@@ -139,22 +139,22 @@ unmanaged machines.
 
 Defaults are the safe choice; change them only for a reason.
 
-| Where | Variable | Default | Effect |
-|---|---|---|---|
-| Relay | `RELAY_MANUAL_ENDPOINTS` | `off` | Self-declared environment endpoints: `public` refuses private networks, `private` allows them; loopback and link-local are always refused. |
-| Relay | `RELAY_API_MAX_BODY_BYTES` | 1 MiB | Largest relay API request. |
-| Relay | `RELAY_CHANNEL_MAX_BODY_BYTES` | 50 MiB | Largest request carried to an environment. |
-| Relay | `RELAY_MAX_ENVIRONMENTS_PER_USER` | 25 | Environment links per account. |
-| Relay | `<NAME>_FILE` | — | Read a secret such as `DATABASE_URL` from a file. |
-| T3 server | `T3CODE_TELEMETRY_ENABLED` | off | Product analytics and relay tracing. |
-| T3 server | `T3CODE_USAGE_PRICE_FETCH` | on | Model price table download from GitHub. |
-| T3 server | `T3CODE_CONNECT_DEVICE_TRUST_DAYS` | 7 | Days a T3 Connect device stays approved (0 = forever). |
-| T3 server | `T3CODE_RELAY_REMOTE_CONTROL` | on | Remote control through the relay channel. |
-| T3 server | `T3CODE_AGENT_ACTIVITY_PUBLISHING` / `..._REDACT_TITLES` | on / off | Publish agent activity; hide thread and project titles. |
-| T3 server | `T3CODE_ALLOWED_HOSTS` | — | Extra host names for browser sessions behind a reverse proxy. |
-| Client build | `T3CODE_RELAY_PINNED` / `T3CODE_RELAY_ALLOWLIST` | off | Lock clients to `T3CODE_RELAY_URL`, or to a list of relays. |
-| Android build | `T3CODE_ANDROID_ALLOW_CLEARTEXT` / `..._TRUST_USER_CAS` | off | Allow `http://` servers; trust user-installed CAs. |
-| Android build | `T3CODE_MOBILE_UPDATES_ENABLED` | off | Expo over-the-air updates. |
+| Where         | Variable                                                 | Default  | Effect                                                                                                                                     |
+| ------------- | -------------------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| Relay         | `RELAY_MANUAL_ENDPOINTS`                                 | `off`    | Self-declared environment endpoints: `public` refuses private networks, `private` allows them; loopback and link-local are always refused. |
+| Relay         | `RELAY_API_MAX_BODY_BYTES`                               | 1 MiB    | Largest relay API request.                                                                                                                 |
+| Relay         | `RELAY_CHANNEL_MAX_BODY_BYTES`                           | 50 MiB   | Largest request carried to an environment.                                                                                                 |
+| Relay         | `RELAY_MAX_ENVIRONMENTS_PER_USER`                        | 25       | Environment links per account.                                                                                                             |
+| Relay         | `<NAME>_FILE`                                            | —        | Read a secret such as `DATABASE_URL` from a file.                                                                                          |
+| T3 server     | `T3CODE_TELEMETRY_ENABLED`                               | off      | Product analytics and relay tracing.                                                                                                       |
+| T3 server     | `T3CODE_USAGE_PRICE_FETCH`                               | on       | Model price table download from GitHub.                                                                                                    |
+| T3 server     | `T3CODE_CONNECT_DEVICE_TRUST_DAYS`                       | 7        | Days a T3 Connect device stays approved (0 = forever).                                                                                     |
+| T3 server     | `T3CODE_RELAY_REMOTE_CONTROL`                            | on       | Remote control through the relay channel.                                                                                                  |
+| T3 server     | `T3CODE_AGENT_ACTIVITY_PUBLISHING` / `..._REDACT_TITLES` | on / off | Publish agent activity; hide thread and project titles.                                                                                    |
+| T3 server     | `T3CODE_ALLOWED_HOSTS`                                   | —        | Extra host names for browser sessions behind a reverse proxy.                                                                              |
+| Client build  | `T3CODE_RELAY_PINNED` / `T3CODE_RELAY_ALLOWLIST`         | off      | Lock clients to `T3CODE_RELAY_URL`, or to a list of relays.                                                                                |
+| Android build | `T3CODE_ANDROID_ALLOW_CLEARTEXT` / `..._TRUST_USER_CAS`  | off      | Allow `http://` servers; trust user-installed CAs.                                                                                         |
+| Android build | `T3CODE_MOBILE_UPDATES_ENABLED`                          | off      | Expo over-the-air updates.                                                                                                                 |
 
 New devices wait for approval by default (`requireConnectDeviceApproval`), and provider update
 checks are off by default (`enableProviderUpdateChecks`); both are in server settings.
