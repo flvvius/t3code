@@ -1,6 +1,9 @@
 import { createClerkClient, verifyToken } from "@clerk/backend";
+import { isLocalLoopbackHost } from "@t3tools/shared/hostClassification";
 import { decodeIdTokenClaims, oidcAccountId, oidcDiscoveryUrl } from "@t3tools/shared/oidc";
 import * as Effect from "effect/Effect";
+import * as Stream from "effect/Stream";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as Duration from "effect/Duration";
 import * as Exit from "effect/Exit";
 import * as Redacted from "effect/Redacted";
@@ -34,12 +37,24 @@ export interface VerifiedSubject {
 
 const OIDC_ALGORITHMS = ["RS256", "ES256", "EdDSA"] as const;
 const OIDC_DISCOVERY_TIMEOUT = "10 seconds";
+// Real discovery documents are a few KiB.
+const OIDC_DISCOVERY_MAX_BYTES = 256 * 1024;
+
+/** HTTPS, or plain HTTP to this machine for local identity providers and tests. */
+function isSecureOidcUrl(value: string): boolean {
+  const url = URL.parse(value);
+  if (url === null || url.username !== "" || url.password !== "") return false;
+  if (url.protocol === "https:") return true;
+  return url.protocol === "http:" && isLocalLoopbackHost(url.hostname);
+}
 
 const OidcDiscoveryDocument = Schema.Struct({
   issuer: Schema.String,
   jwks_uri: Schema.String,
 });
-const decodeOidcDiscoveryDocument = Schema.decodeUnknownEffect(OidcDiscoveryDocument);
+const decodeOidcDiscoveryDocument = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(OidcDiscoveryDocument),
+);
 const isSubjectTokenVerificationFailed = Schema.is(SubjectTokenVerificationFailed);
 
 /**
@@ -48,16 +63,38 @@ const isSubjectTokenVerificationFailed = Schema.is(SubjectTokenVerificationFaile
  * a reverse proxy that rewrites the public origin should be reflected in the configured issuer.
  */
 export const makeOidcKeySet = Effect.fn("relay.auth.make_oidc_key_set")(function* (issuer: string) {
-  const httpClient = yield* HttpClient.HttpClient;
+  const discoveryUrl = oidcDiscoveryUrl(issuer);
+  if (!isSecureOidcUrl(discoveryUrl)) {
+    return yield* Effect.die(
+      `OIDC_ISSUER must be an https URL (plain http is accepted for loopback only): ${issuer}`,
+    );
+  }
+  // Whoever answers discovery picks the keys every token is checked against, so a redirect, which
+  // fetch would otherwise follow, must not move that choice to another origin.
+  const httpClient = HttpClient.transform(yield* HttpClient.HttpClient, (effect) =>
+    Effect.provideService(effect, FetchHttpClient.RequestInit, { redirect: "manual" }),
+  );
   const scope = yield* Effect.scope;
   const discover = Effect.gen(function* () {
-    const response = yield* httpClient.execute(HttpClientRequest.get(oidcDiscoveryUrl(issuer)));
+    const response = yield* httpClient.execute(HttpClientRequest.get(discoveryUrl));
     if (response.status !== 200) {
       return yield* new SubjectTokenVerificationFailed({
         cause: `oidc_discovery_status_${response.status}`,
       });
     }
-    const document = yield* response.json.pipe(Effect.flatMap(decodeOidcDiscoveryDocument));
+    const decoder = new TextDecoder();
+    const body = yield* Stream.runFoldEffect(
+      response.stream,
+      () => ({ size: 0, text: "" }),
+      (read, chunk) =>
+        read.size + chunk.byteLength > OIDC_DISCOVERY_MAX_BYTES
+          ? Effect.fail(new SubjectTokenVerificationFailed({ cause: "oidc_discovery_too_large" }))
+          : Effect.succeed({
+              size: read.size + chunk.byteLength,
+              text: read.text + decoder.decode(chunk, { stream: true }),
+            }),
+    );
+    const document = yield* decodeOidcDiscoveryDocument(body.text + decoder.decode());
     if (document.issuer !== issuer) {
       return yield* new SubjectTokenVerificationFailed({ cause: "oidc_issuer_mismatch" });
     }
@@ -87,7 +124,28 @@ const readUnverifiedIssuer = (token: string): string | undefined => {
   }
 };
 
-const OidcClaims = Schema.Struct({ sub: Schema.NonEmptyString });
+const OidcClaims = Schema.Struct({
+  sub: Schema.NonEmptyString,
+  azp: Schema.optionalKey(Schema.String),
+  scp: Schema.optionalKey(Schema.Unknown),
+});
+
+/**
+ * The relay accepts ID tokens only. An access token for an API on the same app registration can
+ * carry the same issuer and audience; access tokens carry `scp` (Entra) or the `at+jwt` type
+ * (RFC 9068). `azp`, when present, names the client the token was issued to.
+ */
+export function oidcIdTokenRejection(
+  header: { readonly typ?: string | undefined },
+  claims: typeof OidcClaims.Type,
+  audience: string,
+): string | null {
+  const typ = header.typ?.toLowerCase();
+  if (typ === "at+jwt" || typ === "application/at+jwt") return "access_token_type";
+  if (claims.scp !== undefined) return "access_token_scope";
+  if (claims.azp !== undefined && claims.azp !== audience) return "authorized_party_mismatch";
+  return null;
+}
 
 /** Binds the crypto service at startup, since the auth middleware cannot require services. */
 export const makeOidcVerifier = Effect.fn("relay.auth.make_oidc_verifier")(function* (options: {
@@ -112,10 +170,15 @@ export const makeOidcVerifier = Effect.fn("relay.auth.make_oidc_verifier")(funct
           Effect.mapError((cause) => new SubjectTokenVerificationFailed({ cause })),
         ),
       ),
-      Effect.map(({ claims }): VerifiedSubject => ({
-        sub: oidcAccountId(options.issuer, claims.sub),
-        mode: "oidc_bearer",
-      })),
+      Effect.flatMap(({ claims, protectedHeader }) => {
+        const rejection = oidcIdTokenRejection(protectedHeader, claims, options.audience);
+        return rejection === null
+          ? Effect.succeed<VerifiedSubject>({
+              sub: oidcAccountId(options.issuer, claims.sub),
+              mode: "oidc_bearer",
+            })
+          : Effect.fail(new SubjectTokenVerificationFailed({ cause: rejection }));
+      }),
       Effect.withSpan("relay.auth.verify_oidc_token"),
     );
 });

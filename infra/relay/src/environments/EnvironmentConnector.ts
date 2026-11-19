@@ -195,6 +195,34 @@ const currentTraceId = Effect.currentSpan.pipe(
   Effect.orElseSucceed(() => "unavailable"),
 );
 
+/**
+ * Sends requests to endpoints environments declare themselves. A host that can check where a
+ * connection really goes (see `host/manualEndpointClient.ts`) provides one; otherwise the relay's
+ * own client is used.
+ */
+export class ManualEndpointHttpClient extends Context.Service<
+  ManualEndpointHttpClient,
+  HttpClient.HttpClient
+>()("t3code-relay/environments/EnvironmentConnector/ManualEndpointHttpClient") {}
+
+// An environment picks its own address, so how a request to it failed would map the relay's
+// network for it. Callers get this instead; the reason stays in the relay's logs.
+const MANUAL_ENDPOINT_FAILURE = { endpointFailure: "unknown" } as const;
+const MANUAL_ENDPOINT_HEALTH_FAILURE = "Endpoint health request failed.";
+
+/** The messages along a failure's cause chain, for the relay's own logs. */
+function transportFailureDetail(cause: unknown): string {
+  const parts: Array<string> = [];
+  for (let current = cause, depth = 0; depth < 4 && current instanceof Error; depth++) {
+    parts.push(current.message);
+    current = current.cause;
+  }
+  if (HttpClientError.isHttpClientError(cause) && cause.reason._tag === "TransportError") {
+    parts.push(transportFailureDetail(cause.reason.cause));
+  }
+  return parts.filter((part) => part.length > 0).join(": ");
+}
+
 export const withoutRedirects = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   effect.pipe(Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }));
 
@@ -383,8 +411,8 @@ const parseEndpointUrl = (value: string): URL | null => {
 /**
  * An environment that declares its own address has no allocation to check it against, and the
  * relay will send requests to it. Require a secure address that is not an internal one, so a
- * linked environment cannot point the relay at its own network.
- * DNS names that resolve to private addresses are not detected here.
+ * linked environment cannot point the relay at its own network. Names are checked again where
+ * they resolve, by the host's `ManualEndpointHttpClient`.
  */
 export function validateManualEndpoint(input: {
   readonly endpoint: RelayManagedEndpoint;
@@ -443,13 +471,19 @@ const make = Effect.gen(function* () {
   const allocations = yield* ManagedEndpointAllocations.ManagedEndpointAllocations;
   const settings = yield* RelayConfiguration.RelayConfiguration;
   const httpClient = yield* HttpClient.HttpClient;
+  const manualHttpClient = yield* Effect.serviceOption(ManualEndpointHttpClient);
   const random = yield* SecureRandom.SecureRandom;
   const signature = yield* Signature.Signature;
   const mint = yield* CloudMintSigner.CloudMintSigner;
   const relayIssuer = normalizeRelayIssuer(settings.relayIssuer);
-  const makeEnvironmentClient = (httpBaseUrl: string) =>
-    makeEnvironmentHttpApiClient(httpBaseUrl).pipe(
-      Effect.provideService(HttpClient.HttpClient, httpClient),
+  const makeEnvironmentClient = (endpoint: RelayManagedEndpoint) =>
+    makeEnvironmentHttpApiClient(endpoint.httpBaseUrl).pipe(
+      Effect.provideService(
+        HttpClient.HttpClient,
+        endpoint.providerKind === "manual"
+          ? Option.getOrElse(manualHttpClient, () => httpClient)
+          : httpClient,
+      ),
     );
   const resolveManagedEndpoint = Effect.fn("relay.environment_connector.resolve_managed_endpoint")(
     function* (input: {
@@ -558,7 +592,8 @@ const make = Effect.gen(function* () {
         );
       const checkedAt = DateTime.formatIso(now);
       const traceId = yield* currentTraceId;
-      const environmentClient = yield* makeEnvironmentClient(endpoint.httpBaseUrl);
+      const manual = endpoint.providerKind === "manual";
+      const environmentClient = yield* makeEnvironmentClient(endpoint);
       const responseOption = yield* environmentClient.connect.health({ payload: { proof } }).pipe(
         withoutRedirects,
         Effect.match({
@@ -582,8 +617,12 @@ const make = Effect.gen(function* () {
           endpoint,
           status: "offline" as const,
           checkedAt,
-          error: "Managed endpoint health request timed out.",
-          endpointFailure: "timeout" as const,
+          ...(manual
+            ? { error: MANUAL_ENDPOINT_HEALTH_FAILURE, ...MANUAL_ENDPOINT_FAILURE }
+            : {
+                error: "Managed endpoint health request timed out.",
+                endpointFailure: "timeout" as const,
+              }),
           ...offlineReasonFor(allocation),
           traceId,
         };
@@ -602,6 +641,7 @@ const make = Effect.gen(function* () {
           endpoint: endpoint.httpBaseUrl,
           failureReason,
           endpointFailure: diagnosis.endpointFailure,
+          ...(manual ? { cause: transportFailureDetail(responseOption.value.cause) } : {}),
           traceId,
         });
         return {
@@ -609,8 +649,12 @@ const make = Effect.gen(function* () {
           endpoint,
           status: "offline" as const,
           checkedAt,
-          error: environmentHealthRequestFailureMessage(responseOption.value.cause),
-          ...diagnosis,
+          ...(manual
+            ? { error: MANUAL_ENDPOINT_HEALTH_FAILURE, ...MANUAL_ENDPOINT_FAILURE }
+            : {
+                error: environmentHealthRequestFailureMessage(responseOption.value.cause),
+                ...diagnosis,
+              }),
           ...offlineReasonFor(allocation),
           traceId,
         };
@@ -722,34 +766,59 @@ const make = Effect.gen(function* () {
               }),
           ),
         );
-      const environmentClient = yield* makeEnvironmentClient(endpoint.httpBaseUrl);
+      const manual = endpoint.providerKind === "manual";
+      const environmentClient = yield* makeEnvironmentClient(endpoint);
       const decoded = yield* environmentClient.connect
         .t3MintCredential({ payload: { proof } })
         .pipe(
           withoutRedirects,
           Effect.catch((cause) =>
-            diagnoseEndpointFailure(cause).pipe(
-              Effect.flatMap((diagnosis) =>
-                Effect.fail(
-                  new EnvironmentMintRequestFailed({
-                    environmentId: input.environmentId,
-                    operation: "connect",
-                    cause,
-                    ...diagnosis,
-                  }),
+            manual
+              ? Effect.logWarning("Manual endpoint mint request failed", {
+                  environmentId: link.environmentId,
+                  endpoint: endpoint.httpBaseUrl,
+                  cause: transportFailureDetail(cause),
+                }).pipe(
+                  Effect.andThen(
+                    Effect.fail(
+                      new EnvironmentMintRequestFailed({
+                        environmentId: input.environmentId,
+                        operation: "connect",
+                        cause,
+                        ...MANUAL_ENDPOINT_FAILURE,
+                      }),
+                    ),
+                  ),
+                )
+              : diagnoseEndpointFailure(cause).pipe(
+                  Effect.flatMap((diagnosis) =>
+                    Effect.fail(
+                      new EnvironmentMintRequestFailed({
+                        environmentId: input.environmentId,
+                        operation: "connect",
+                        cause,
+                        ...diagnosis,
+                      }),
+                    ),
+                  ),
                 ),
-              ),
-            ),
           ),
           Effect.timeoutOption(Duration.millis(ENVIRONMENT_MINT_REQUEST_TIMEOUT_MS)),
           Effect.flatMap(
             Option.match({
               onNone: () =>
                 Effect.fail(
-                  new EnvironmentMintRequestTimedOut({
-                    environmentId: input.environmentId,
-                    timeoutMs: ENVIRONMENT_MINT_REQUEST_TIMEOUT_MS,
-                  }),
+                  manual
+                    ? new EnvironmentMintRequestFailed({
+                        environmentId: input.environmentId,
+                        operation: "connect",
+                        cause: "timeout",
+                        ...MANUAL_ENDPOINT_FAILURE,
+                      })
+                    : new EnvironmentMintRequestTimedOut({
+                        environmentId: input.environmentId,
+                        timeoutMs: ENVIRONMENT_MINT_REQUEST_TIMEOUT_MS,
+                      }),
                 ),
               onSome: Effect.succeed,
             }),

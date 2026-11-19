@@ -476,6 +476,7 @@ describe("relay environment authentication", () => {
       create: () => Effect.die("unused create"),
       authenticate: () => Effect.fail(failure),
       revokeForEnvironmentPublicKey: () => Effect.die("unused revoke"),
+      pruneRevoked: () => Effect.die("unused prune"),
     };
 
     return Effect.gen(function* () {
@@ -552,6 +553,7 @@ function layerRelayUnlinkTest(input?: {
         create: () => Effect.die("unused create"),
         authenticate: () => Effect.die("unused authenticate"),
         revokeForEnvironmentPublicKey: input?.revokeCredential ?? (() => Effect.succeed(false)),
+        pruneRevoked: () => Effect.die("unused prune"),
       }),
     ),
     Layer.succeed(

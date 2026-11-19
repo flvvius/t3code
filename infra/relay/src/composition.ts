@@ -184,6 +184,9 @@ export const composeRelay = Effect.fn("relay.composition.compose")(function* <R>
       cloudMintPublicKey: yield* cloudMintPublicKey,
       managedEndpointBaseDomain: host.managedEndpointBaseDomain,
       ...(host.channels ? { channels: true } : {}),
+      ...(host.maxEnvironmentsPerUser === undefined
+        ? {}
+        : { maxEnvironmentsPerUser: host.maxEnvironmentsPerUser }),
       managedEndpointNamespace: stage,
       managedEndpointCleanupMode,
       legacyManagedEndpointCleanupMode,
@@ -195,12 +198,19 @@ export const composeRelay = Effect.fn("relay.composition.compose")(function* <R>
   });
 
   const layerHookInbox = host.hookInbox;
+  const layerManualEndpointHttpClient =
+    manualEndpoints === "off" || host.manualEndpointHttpClient === undefined
+      ? Layer.empty
+      : Layer.succeed(
+          EnvironmentConnector.ManualEndpointHttpClient,
+          yield* host.manualEndpointHttpClient(manualEndpoints),
+        );
 
   const layerRuntime = Layer.empty.pipe(
     Layer.provideMerge(MobileRegistrations.layer),
     Layer.provideMerge(AgentActivityPublisher.layer),
     Layer.provideMerge(EnvironmentConnector.layer),
-    Layer.provideMerge(EnvironmentLinker.layer),
+    Layer.provideMerge(Layer.merge(EnvironmentLinker.layer, layerManualEndpointHttpClient)),
     Layer.provideMerge(
       Layer.mergeAll(
         EnvironmentPublishSignatures.layer,
@@ -351,6 +361,16 @@ export const composeRelay = Effect.fn("relay.composition.compose")(function* <R>
               Effect.flatMap(([activityRows, now]) =>
                 activityRows.pruneTerminal({
                   updatedBefore: DateTime.formatIso(DateTime.subtract(now, { minutes: 30 })),
+                  abandonedBefore: DateTime.formatIso(DateTime.subtract(now, { days: 7 })),
+                }),
+              ),
+            ),
+          ),
+          Effect.andThen(
+            Effect.all([EnvironmentCredentials.EnvironmentCredentials, DateTime.now]).pipe(
+              Effect.flatMap(([credentials, now]) =>
+                credentials.pruneRevoked({
+                  revokedBefore: DateTime.formatIso(DateTime.subtract(now, { days: 30 })),
                 }),
               ),
             ),

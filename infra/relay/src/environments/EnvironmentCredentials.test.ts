@@ -144,7 +144,22 @@ describe("EnvironmentCredentials", () => {
   it.effect("revokes active credentials for an environment public key", () => {
     const updateValues: Array<Record<string, unknown>> = [];
     const whereConditions: Array<unknown> = [];
+    const executed: Array<unknown> = [];
+    const pruned: Array<unknown> = [];
     const fakeDb = {
+      execute: (query: unknown) => {
+        executed.push(query);
+        return Effect.succeed([]);
+      },
+      delete: (table: unknown) => {
+        expect(table).toBe(relayEnvironmentCredentials);
+        return {
+          where: (condition: unknown) => {
+            pruned.push(condition);
+            return Effect.void;
+          },
+        };
+      },
       update: (table: unknown) => {
         expect(table).toBe(relayEnvironmentCredentials);
         return {
@@ -173,6 +188,10 @@ describe("EnvironmentCredentials", () => {
       });
 
       expect(revoked).toBe(true);
+      expect(executed).toHaveLength(1);
+      const notify = new PgDialect().sqlToQuery(executed[0] as never);
+      expect(notify.sql).toContain("pg_notify");
+      expect(notify.params).toEqual([EnvironmentCredentials.CREDENTIALS_REVOKED_CHANNEL]);
       expect(updateValues).toHaveLength(1);
       expect(updateValues[0]?.revokedAt).toEqual(updateValues[0]?.updatedAt);
       expect(whereConditions).toHaveLength(1);
@@ -191,6 +210,12 @@ describe("EnvironmentCredentials", () => {
         "env_test",
         "environment-public-key",
       ]);
+
+      // Revoked rows are kept a while, then forgotten; active ones (revoked_at null) never match.
+      yield* credentials.pruneRevoked({ revokedBefore: "2026-10-01T00:00:00.000Z" });
+      const prune = new PgDialect().sqlToQuery(pruned[0] as never);
+      expect(prune.sql).toBe('"relay_environment_credentials"."revoked_at" < $1');
+      expect(prune.params).toEqual(["2026-10-01T00:00:00.000Z"]);
     }).pipe(
       Effect.provide(
         EnvironmentCredentials.layer.pipe(

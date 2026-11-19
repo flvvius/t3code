@@ -7,7 +7,7 @@ import * as Function from "effect/Function";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import { and, desc, eq, isNull, lt, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, lt, or, sql } from "drizzle-orm";
 
 import * as RelayDb from "../db.ts";
 import { relayAgentActivityRows, relayEnvironmentLinks } from "../persistence/schema.ts";
@@ -69,8 +69,13 @@ export class AgentActivityRows extends Context.Service<
       readonly environmentPublicKey: string;
       readonly state: RelayAgentActivityState;
     }) => Effect.Effect<void, AgentActivityRowUpsertPersistenceError>;
+    /**
+     * Drops finished rows untouched since `updatedBefore`, and rows in any phase untouched since
+     * `abandonedBefore`, whose environment stopped reporting before they finished.
+     */
     readonly pruneTerminal: (input: {
       readonly updatedBefore: string;
+      readonly abandonedBefore?: string;
     }) => Effect.Effect<void, AgentActivityRowPruneTerminalPersistenceError>;
     readonly remove: (input: {
       readonly environmentId: string;
@@ -187,9 +192,14 @@ const make = Effect.gen(function* () {
       yield* db
         .delete(relayAgentActivityRows)
         .where(
-          and(
-            sql`${relayAgentActivityRows.stateJson} ->> 'phase' IN ('completed', 'failed')`,
-            lt(relayAgentActivityRows.updatedAt, input.updatedBefore),
+          or(
+            and(
+              sql`${relayAgentActivityRows.stateJson} ->> 'phase' IN ('completed', 'failed')`,
+              lt(relayAgentActivityRows.updatedAt, input.updatedBefore),
+            ),
+            input.abandonedBefore === undefined
+              ? undefined
+              : lt(relayAgentActivityRows.updatedAt, input.abandonedBefore),
           ),
         )
         .pipe(

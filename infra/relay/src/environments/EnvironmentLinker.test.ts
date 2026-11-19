@@ -20,6 +20,7 @@ import * as RelayTokens from "../auth/RelayTokens.ts";
 import * as EnvironmentCredentials from "./EnvironmentCredentials.ts";
 import * as EnvironmentLinks from "./EnvironmentLinks.ts";
 import * as RelayConfiguration from "../Config.ts";
+import * as RelayDb from "../db.ts";
 import * as EnvironmentLinker from "./EnvironmentLinker.ts";
 import * as ManagedEndpointProvider from "./ManagedEndpointProvider.ts";
 
@@ -161,15 +162,40 @@ const makePublishOnlyRequest = (httpBaseUrl = "http://127.0.0.1:3773/") =>
 
 function layerTest(input?: {
   readonly channels?: boolean;
+  readonly maxEnvironmentsPerUser?: number;
+  readonly activeLinks?: number;
   readonly upsert?: EnvironmentLinks.EnvironmentLinks["Service"]["upsert"];
+  readonly create?: EnvironmentCredentials.EnvironmentCredentials["Service"]["create"];
+  readonly transaction?: { open: boolean; outcome?: "committed" | "rolled-back" };
   readonly consume?: DpopProofs.DpopProofReplay["Service"]["consume"];
   readonly deprovision?: ManagedEndpointProvider.ManagedEndpointProvider["Service"]["deprovision"];
 }) {
+  const transaction = input?.transaction ?? { open: false };
   return EnvironmentLinker.layer.pipe(
     Layer.provideMerge(RelayTokens.layer.pipe(Layer.provide(CloudMintSigner.layer))),
     Layer.provide(
       Layer.mergeAll(
-        RelayConfiguration.layer(input?.channels ? { ...config, channels: true } : config),
+        RelayConfiguration.layer({
+          ...config,
+          ...(input?.channels ? { channels: true } : {}),
+          ...(input?.maxEnvironmentsPerUser === undefined
+            ? {}
+            : { maxEnvironmentsPerUser: input.maxEnvironmentsPerUser }),
+        }),
+        Layer.succeed(RelayDb.RelayTransactions, {
+          withTransaction: (effect) =>
+            Effect.sync(() => {
+              transaction.open = true;
+            }).pipe(
+              Effect.andThen(effect),
+              Effect.onExit((exit) =>
+                Effect.sync(() => {
+                  transaction.open = false;
+                  transaction.outcome = exit._tag === "Success" ? "committed" : "rolled-back";
+                }),
+              ),
+            ),
+        }),
         Layer.succeed(DpopProofs.DpopProofReplay, {
           verifyAndConsume: () => Effect.die("unexpected DPoP proof verification"),
           consume: input?.consume ?? (() => Effect.succeed(true)),
@@ -178,16 +204,18 @@ function layerTest(input?: {
         Layer.succeed(EnvironmentLinks.EnvironmentLinks, {
           upsert: input?.upsert ?? (() => Effect.void),
           listDeliveryUsersForEnvironment: () => Effect.succeed([]),
-          listForUser: () => Effect.succeed([]),
+          listForUser: () =>
+            Effect.succeed(Array.from({ length: input?.activeLinks ?? 0 }, () => ({}) as never)),
           getForUser: () => Effect.succeed(null),
           findActiveManagedForEnvironment: () => Effect.succeed([]),
           setHoldWebhooksWhileOffline: () => Effect.void,
           revokeForUser: () => Effect.succeed(false),
         }),
         Layer.succeed(EnvironmentCredentials.EnvironmentCredentials, {
-          create: () => Effect.succeed("t3env_credential_secret"),
+          create: input?.create ?? (() => Effect.succeed("t3env_credential_secret")),
           authenticate: () => Effect.succeedNone,
           revokeForEnvironmentPublicKey: () => Effect.succeed(false),
+          pruneRevoked: () => Effect.die("unused"),
         }),
         Layer.succeed(ManagedEndpointProvider.ManagedEndpointProvider, {
           reconcileOrigin: () => Effect.succeed("ready"),
@@ -213,6 +241,8 @@ function layerTest(input?: {
 describe("EnvironmentLinker", () => {
   it.effect("uses verified JWT claims when linking an environment", () => {
     let persistedEnvironmentId: string | null = null;
+    const transaction: { open: boolean; outcome?: "committed" | "rolled-back" } = { open: false };
+    const writesInTransaction: Array<boolean> = [];
     return Effect.gen(function* () {
       const { request, payload } = yield* makeRequest;
       const linker = yield* EnvironmentLinker.EnvironmentLinker;
@@ -220,12 +250,54 @@ describe("EnvironmentLinker", () => {
       expect(result.environmentId).toBe(payload.environmentId);
       expect(result.environmentCredential).toBe("t3env_credential_secret");
       expect(persistedEnvironmentId).toBe(payload.environmentId);
+      // The link and its credential commit together or not at all.
+      expect(writesInTransaction).toEqual([true, true]);
+      expect(transaction.outcome).toBe("committed");
     }).pipe(
       Effect.provide(
         layerTest({
+          transaction,
+          maxEnvironmentsPerUser: 2,
+          activeLinks: 2,
           upsert: (input) =>
             Effect.sync(() => {
+              writesInTransaction.push(transaction.open);
               persistedEnvironmentId = input.proof.environmentId;
+            }),
+          create: () =>
+            Effect.sync(() => {
+              writesInTransaction.push(transaction.open);
+              return "t3env_credential_secret";
+            }),
+        }),
+      ),
+    );
+  });
+
+  it.effect("refuses a link past the account's cap and rolls the link back", () => {
+    const transaction: { open: boolean; outcome?: "committed" | "rolled-back" } = { open: false };
+    let credentialCreated = false;
+    return Effect.gen(function* () {
+      const { request } = yield* makeRequest;
+      const linker = yield* EnvironmentLinker.EnvironmentLinker;
+      const error = yield* Effect.flip(linker.link({ userId: "user_123", request }));
+      expect(error).toMatchObject({
+        _tag: "ManagedTunnelLimitExceeded",
+        maxTunnels: 2,
+        activeTunnels: 2,
+      });
+      expect(transaction.outcome).toBe("rolled-back");
+      expect(credentialCreated).toBe(false);
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          transaction,
+          maxEnvironmentsPerUser: 2,
+          activeLinks: 3,
+          create: () =>
+            Effect.sync(() => {
+              credentialCreated = true;
+              return "t3env_credential_secret";
             }),
         }),
       ),

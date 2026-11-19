@@ -33,6 +33,8 @@ export interface RelayHost<R = never> {
   readonly managedEndpointBaseDomain: string | undefined;
   /** Whether environments with no public address are carried over relay channels at `/env/<key>/`. */
   readonly channels?: boolean;
+  /** Active environment links one account may hold; unset means no cap. */
+  readonly maxEnvironmentsPerUser?: number;
   readonly database: RelayDb.RelayDb["Service"];
   /** Tunnel and DNS clients behind managed endpoints; inert on hosts without managed tunnels. */
   readonly managedEndpointClients: Layer.Layer<
@@ -42,6 +44,13 @@ export interface RelayHost<R = never> {
     CloudflareApiPause.CloudflareApiPause | HttpClient.HttpClient
   >;
   readonly hookInbox: Layer.Layer<HookInbox.HookInbox>;
+  /**
+   * Reaches endpoints environments declare themselves only at addresses the policy allows,
+   * checked where the name resolves. Hosts without one use their default client.
+   */
+  readonly manualEndpointHttpClient?: (
+    policy: "public" | "private",
+  ) => Effect.Effect<HttpClient.HttpClient>;
   /** Each limiter may fail; the composition decides to fail open. */
   readonly rateLimits: {
     readonly hook: (key: string) => Effect.Effect<boolean, Ports.RateLimitUnavailableError>;

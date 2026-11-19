@@ -21,7 +21,7 @@ import * as Redacted from "effect/Redacted";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Tracer from "effect/Tracer";
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
+import { HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 import * as CloudMintSigner from "../auth/CloudMintSigner.ts";
 import * as EnvironmentLinks from "./EnvironmentLinks.ts";
@@ -161,9 +161,20 @@ function layerConnectorTest(
     readonly links?: EnvironmentLinks.EnvironmentLinks["Service"];
     readonly allocations?: ManagedEndpointAllocations.ManagedEndpointAllocations["Service"];
     readonly manualEndpoints?: RelayConfiguration.ManualEndpointsMode;
+    readonly manualExecute?: (
+      request: HttpClientRequest.HttpClientRequest,
+    ) => Effect.Effect<HttpClientResponse.HttpClientResponse, HttpClientError.HttpClientError>;
   },
 ) {
   return EnvironmentConnector.layer.pipe(
+    Layer.provide(
+      options?.manualExecute === undefined
+        ? Layer.empty
+        : Layer.succeed(
+            EnvironmentConnector.ManualEndpointHttpClient,
+            HttpClient.make(options.manualExecute),
+          ),
+    ),
     Layer.provide(CloudMintSigner.layer),
     Layer.provide(NodeCryptoLayer.layer),
     Layer.provide(Layer.succeed(EnvironmentLinks.EnvironmentLinks, options?.links ?? makeLinks())),
@@ -364,6 +375,63 @@ describe("EnvironmentConnector", () => {
       ),
     );
   });
+
+  it.effect(
+    "sends self-declared endpoints through the host's guard and hides why they failed",
+    () => {
+      const manualEndpoint = {
+        httpBaseUrl: "https://10-0-0-5.example.dev/",
+        wsBaseUrl: "wss://10-0-0-5.example.dev/ws",
+        providerKind: "manual" as const,
+      };
+      const execute = () => Effect.die("manual endpoints must not use the relay's own client");
+      const refused = (request: HttpClientRequest.HttpClientRequest) =>
+        Effect.fail(
+          new HttpClientError.HttpClientError({
+            reason: new HttpClientError.TransportError({
+              request,
+              cause: Object.assign(new Error("connect ECONNREFUSED 10.0.0.5:443"), {
+                code: "ECONNREFUSED",
+              }),
+            }),
+          }),
+        );
+
+      return Effect.gen(function* () {
+        const connector = yield* EnvironmentConnector.EnvironmentConnector;
+        const status = yield* connector.status({
+          userId: "user_123",
+          environmentId: "env-connector-test",
+        });
+        expect(status).toMatchObject({
+          status: "offline",
+          error: "Endpoint health request failed.",
+          endpointFailure: "unknown",
+        });
+        const connect = yield* Effect.flip(
+          connector.connect({
+            userId: "user_123",
+            environmentId: "env-connector-test",
+            clientProofKeyThumbprint: "thumbprint",
+          }),
+        );
+        expect(connect).toMatchObject({
+          _tag: "EnvironmentMintRequestFailed",
+          endpointFailure: "unknown",
+        });
+        expect(connect).not.toHaveProperty("endpointStatus");
+      }).pipe(
+        Effect.provide(
+          layerConnectorTest(execute, {
+            manualEndpoints: "public",
+            manualExecute: refused,
+            allocations: makeAllocations(null),
+            links: makeLinks({ endpoint: manualEndpoint }),
+          }),
+        ),
+      );
+    },
+  );
 
   it.effect("rejects stale managed endpoints before sending a mint request", () => {
     let requestCount = 0;

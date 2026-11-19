@@ -7,7 +7,7 @@ import * as Base64Url from "effect/encoding/Base64Url";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import { and, eq, exists, isNull, ne, notExists } from "drizzle-orm";
+import { and, eq, exists, isNull, lt, ne, notExists, sql } from "drizzle-orm";
 import { QueryBuilder } from "drizzle-orm/pg-core";
 
 import * as RelayDb from "../db.ts";
@@ -47,12 +47,15 @@ export class EnvironmentCredentialAuthenticatePersistenceError extends Schema.Ta
 export class EnvironmentCredentialRevokePersistenceError extends Schema.TaggedError<EnvironmentCredentialRevokePersistenceError>()(
   "EnvironmentCredentialRevokePersistenceError",
   {
-    environmentId: Schema.String,
+    /** Absent when pruning revoked credentials of every environment. */
+    environmentId: Schema.optionalKey(Schema.String),
     cause: Schema.Defect(),
   },
 ) {
   override get message(): string {
-    return `Failed to revoke credentials for environment '${this.environmentId}'`;
+    return this.environmentId === undefined
+      ? "Failed to prune revoked environment credentials"
+      : `Failed to revoke credentials for environment '${this.environmentId}'`;
   }
 }
 
@@ -79,6 +82,10 @@ export class EnvironmentCredentials extends Context.Service<
       readonly environmentId: string;
       readonly environmentPublicKey: string;
     }) => Effect.Effect<boolean, EnvironmentCredentialRevokePersistenceError>;
+    /** Forgets credentials revoked before `revokedBefore`; they can never authenticate again. */
+    readonly pruneRevoked: (input: {
+      readonly revokedBefore: string;
+    }) => Effect.Effect<void, EnvironmentCredentialRevokePersistenceError>;
   }
 >()("t3code-relay/environments/EnvironmentCredentials") {}
 
@@ -284,9 +291,33 @@ const make = Effect.gen(function* () {
               }),
           ),
         );
+      if (rows.length > 0) {
+        // Delivered on commit; relays carrying channels recheck them now instead of on their timer.
+        yield* db.execute(sql`SELECT pg_notify(${CREDENTIALS_REVOKED_CHANNEL}, '')`).pipe(
+          Effect.mapError(
+            (cause) =>
+              new EnvironmentCredentialRevokePersistenceError({
+                environmentId: input.environmentId,
+                cause,
+              }),
+          ),
+        );
+      }
       return rows.length > 0;
+    }),
+
+    pruneRevoked: Effect.fn("relay.environment_credentials.prune_revoked")(function* (input) {
+      yield* db
+        .delete(relayEnvironmentCredentials)
+        .where(lt(relayEnvironmentCredentials.revokedAt, input.revokedBefore))
+        .pipe(
+          Effect.mapError((cause) => new EnvironmentCredentialRevokePersistenceError({ cause })),
+        );
     }),
   });
 });
+
+/** The Postgres notification channel announcing revoked environment credentials. */
+export const CREDENTIALS_REVOKED_CHANNEL = "t3_relay_credentials_revoked";
 
 export const layer = Layer.effect(EnvironmentCredentials, make);
