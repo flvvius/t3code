@@ -35,6 +35,11 @@ const Claims = Schema.Struct({
   sub: Schema.String,
   iat: Schema.Number,
   exp: Schema.Number,
+  azp: Schema.optionalKey(Schema.String),
+  scp: Schema.optionalKey(Schema.String),
+  tid: Schema.optionalKey(Schema.String),
+  oid: Schema.optionalKey(Schema.String),
+  ver: Schema.optionalKey(Schema.String),
 });
 
 const signToken = Effect.fn("test.signToken")(function* (options: {
@@ -42,6 +47,8 @@ const signToken = Effect.fn("test.signToken")(function* (options: {
   readonly audience?: string;
   readonly subject?: string;
   readonly expiresInSeconds?: number;
+  readonly typ?: string;
+  readonly claims?: Partial<typeof Claims.Type>;
   readonly privateKey: Jwk.PrivateKey;
 }) {
   const now = Math.floor((yield* Clock.currentTimeMillis) / 1000);
@@ -53,9 +60,10 @@ const signToken = Effect.fn("test.signToken")(function* (options: {
       sub: options.subject ?? "user-1",
       iat: now,
       exp: now + (options.expiresInSeconds ?? 300),
+      ...options.claims,
     },
     options.privateKey,
-    { kid: "k1" },
+    { kid: "k1", ...(options.typ === undefined ? {} : { typ: options.typ }) },
   );
   return Redacted.value(token);
 });
@@ -126,6 +134,43 @@ it.layer(crypto)("SubjectTokens", (it) => {
         verifySubjectToken(f.settings, token, { acceptClerkOAuth: false }),
       );
       expect(Exit.isFailure(exit)).toBe(true);
+    }),
+  );
+
+  it.effect("accepts Entra-shaped ID tokens and an azp naming the relay's client", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const entraIdToken = yield* f.sign({
+        typ: "JWT",
+        claims: { tid: "tenant", oid: "object", ver: "2.0" },
+      });
+      const withAzp = yield* f.sign({ claims: { azp: AUDIENCE } });
+
+      for (const token of [entraIdToken, withAzp]) {
+        expect(yield* verifySubjectToken(f.settings, token, { acceptClerkOAuth: false })).toEqual({
+          sub: oidcAccountId(ISSUER, "user-1"),
+          mode: "oidc_bearer",
+        });
+      }
+    }),
+  );
+
+  it.effect("rejects access tokens and tokens issued to another client", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const cases = [
+        [{ typ: "at+jwt" }, "access_token_type"],
+        [{ typ: "application/at+jwt" }, "access_token_type"],
+        [{ claims: { scp: "relay.access" } }, "access_token_scope"],
+        [{ claims: { azp: "another-client" } }, "authorized_party_mismatch"],
+      ] as const;
+
+      for (const [options, cause] of cases) {
+        const error = yield* Effect.flip(
+          verifySubjectToken(f.settings, yield* f.sign(options), { acceptClerkOAuth: false }),
+        );
+        expect(error.cause).toBe(cause);
+      }
     }),
   );
 
@@ -224,6 +269,46 @@ it.layer(crypto)("SubjectTokens", (it) => {
 
       const error = yield* Effect.flip(keySet);
       expect(error.cause).toBe("oidc_issuer_mismatch");
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("does not follow a redirected discovery request", () =>
+    Effect.gen(function* () {
+      const inits: Array<RequestInit | undefined> = [];
+      const fetches = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        inits.push(init);
+        return new Response(null, { status: 302, headers: { location: "https://evil.test/" } });
+      });
+      const [keySet] = yield* discoverWith(fetches as never);
+
+      const error = yield* Effect.flip(keySet);
+      expect(error.cause).toBe("oidc_discovery_status_302");
+      expect(inits.map((init) => init?.redirect)).toEqual(["manual"]);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("refuses an oversized discovery document", () =>
+    Effect.gen(function* () {
+      const [keySet] = yield* discoverWith(
+        fakeFetch({ issuer: ISSUER, jwks_uri: `${ISSUER}/certs`, padding: "x".repeat(300_000) }),
+      );
+
+      const error = yield* Effect.flip(keySet);
+      expect(error.cause).toBe("oidc_discovery_too_large");
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("refuses a plain-http issuer unless it is on this machine", () =>
+    Effect.gen(function* () {
+      const discover = (issuer: string) =>
+        makeOidcKeySet(issuer).pipe(
+          Effect.provide(FetchHttpClient.layer),
+          Effect.provideService(FetchHttpClient.Fetch, fakeFetch({}) as unknown as typeof fetch),
+          Effect.exit,
+        );
+
+      expect(Exit.hasDies(yield* discover("http://sso.example.com/realms/t3"))).toBe(true);
+      expect(Exit.isSuccess(yield* discover("http://127.0.0.1:8180/realms/t3"))).toBe(true);
     }).pipe(Effect.scoped),
   );
 });
