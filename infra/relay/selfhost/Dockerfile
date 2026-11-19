@@ -1,5 +1,6 @@
 # Self-hosted T3 relay. Build from the repository root (see README.md in this directory).
-FROM node:26-alpine AS build
+# Base images are pinned by digest; README.md shows how to refresh them.
+FROM node:26-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5 AS build
 RUN npm install -g pnpm@12.14.0 vite-plus@1.4.0
 WORKDIR /repo
 COPY . .
@@ -8,7 +9,9 @@ RUN pnpm install --frozen-lockfile --ignore-scripts --filter "t3code-relay..."
 # The bundle inlines every dependency, so the runtime image needs no node_modules.
 RUN vp pack infra/relay/src/node.ts --format esm --platform node --root infra/relay --out-dir /out --no-dts
 
-FROM node:26-alpine
+FROM node:26-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5
+# The relay never installs packages at runtime; npm only adds code to patch.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 WORKDIR /app
 ENV NODE_ENV=production \
     PORT=8080 \
