@@ -367,9 +367,7 @@ const make = Effect.gen(function* () {
   const connectDeviceTrustDays = yield* ConnectDeviceTrustDaysConfig;
   const connectTrustedSince = DateTime.now.pipe(
     Effect.map((now) =>
-      connectDeviceTrustDays > 0
-        ? DateTime.subtract(now, { days: connectDeviceTrustDays })
-        : null,
+      connectDeviceTrustDays > 0 ? DateTime.subtract(now, { days: connectDeviceTrustDays }) : null,
     ),
   );
   const seededGrantsRef = yield* Ref.make(new Map<string, StoredBootstrapGrant>());

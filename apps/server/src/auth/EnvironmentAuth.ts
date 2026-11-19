@@ -1288,9 +1288,9 @@ export const make = Effect.gen(function* () {
           .pipe(Effect.mapError((cause) => new ServerAuthConnectDevicesError({ cause })));
         const connectSessions = (yield* sessions
           .listActive()
-          .pipe(Effect.mapError((cause) => new ServerAuthSessionRevocationError({ cause })))).filter(
-          (session) => session.subject === CLOUD_CONNECT_SUBJECT,
-        );
+          .pipe(
+            Effect.mapError((cause) => new ServerAuthSessionRevocationError({ cause })),
+          )).filter((session) => session.subject === CLOUD_CONNECT_SUBJECT);
         yield* Effect.forEach(
           connectSessions,
           (session) =>

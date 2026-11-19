@@ -448,9 +448,9 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodePlatformCrypto.layer))(
 
         expect(yield* serverAuth.listConnectDevices()).toEqual([]);
         expect(yield* serverAuth.listPairingLinks()).toEqual([]);
-        expect(
-          (yield* serverAuth.listSessions()).map((session) => session.sessionId),
-        ).toEqual([owner.sessionId]);
+        expect((yield* serverAuth.listSessions()).map((session) => session.sessionId)).toEqual([
+          owner.sessionId,
+        ]);
         expect((yield* exchange(unspent.credential, trustedKey).pipe(Effect.flip))._tag).toBe(
           "ServerAuthInvalidCredentialError",
         );
