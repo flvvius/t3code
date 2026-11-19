@@ -281,6 +281,21 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("server settings"
     }).pipe(Effect.provide(layerServerSettings())),
   );
 
+  it.effect("requires T3 Connect device approval unless the host turned it off", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      // Earlier servers left their `false` default out of the file.
+      yield* fs.writeFileString(config.settingsPath, `{ "keepAwakeWhileAgentsWork": false }`);
+      assert.isTrue((yield* service.getSettings).requireConnectDeviceApproval);
+
+      yield* service.updateSettings({ requireConnectDeviceApproval: false });
+      const persisted = JSON.parse(yield* fs.readFileString(config.settingsPath));
+      assert.strictEqual(persisted.requireConnectDeviceApproval, false);
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+
   it.effect("moves an idle compaction mode saved in the legacy switch to its own field", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;

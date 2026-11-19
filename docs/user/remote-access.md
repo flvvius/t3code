@@ -40,12 +40,15 @@ disconnect an otherwise healthy conversation.
 
 ### Approve new devices
 
-By default, any device signed in to your T3 Connect account can open a linked
-machine. To require approval instead, turn on **Require approval for new
-devices** with the T3 Connect settings in **Settings → Sharing & access** on the
-host, or when you first set up T3 Connect. Then someone who takes over your T3
-Connect account cannot reach the machine from a new device without your
-approval. Review the devices that are already approved, described below.
+By default, a new device signed in to your T3 Connect account must be approved
+before it can open a linked machine. Then someone who takes over your T3 Connect
+account, or controls the relay, cannot reach the machine from a new device
+without your approval. Approve your first device from the host itself: the T3
+Code app or browser tab open on the host shows the prompt, or run the
+`t3 auth connect-device` commands below. To let any signed-in device in without
+asking, turn off **Require approval for new devices** in **Settings → Sharing &
+access** on the host. Review the devices that are already approved, described
+below.
 
 A new device waits and shows a code such as `K7QM-2XFD`. Approve it from a
 device that is already connected, using the prompt or **Settings → Sharing &

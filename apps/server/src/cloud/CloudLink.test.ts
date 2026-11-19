@@ -296,7 +296,7 @@ it.effect("an update the client walks away from still finishes", () => {
   );
 });
 
-it.effect("mints a T3 Connect credential under the host's device approval setting", () =>
+it.effect("mints a T3 Connect credential that waits for approval by default", () =>
   withService({}, ({ mintCredential, connectCredentialRequests }) =>
     Effect.gen(function* () {
       const proof = yield* signRelayJwt({
@@ -318,7 +318,7 @@ it.effect("mints a T3 Connect credential under the host's device approval settin
       }).pipe(Effect.provide(NodePlatformCrypto.layerSignature));
       yield* mintCredential({ proof });
       assert.deepEqual(connectCredentialRequests, [
-        { proofKeyThumbprint: "client-jkt", requireApproval: false },
+        { proofKeyThumbprint: "client-jkt", requireApproval: true },
       ]);
     }),
   ),
