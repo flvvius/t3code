@@ -23,7 +23,14 @@ export interface KeyValueStore {
   readonly removeItem: (key: string) => void;
 }
 
-interface StoredSession {
+/** A session is only valid for the relay, provider and client it was obtained for. */
+interface SessionBinding {
+  readonly relayUrl: string;
+  readonly issuer: string;
+  readonly clientId: string;
+}
+
+interface StoredSession extends SessionBinding {
   readonly idToken: string;
   readonly refreshToken: string | null;
   readonly expiresAtEpochMs: number;
@@ -44,7 +51,7 @@ export interface OidcSnapshot {
 }
 
 export interface OidcControllerDeps {
-  readonly config: { readonly issuer: string; readonly clientId: string };
+  readonly config: SessionBinding;
   readonly redirectUri: string;
   /** Survives reloads and is shared between tabs. */
   readonly sessions: KeyValueStore;
@@ -60,6 +67,24 @@ export interface OidcControllerDeps {
 
 const SIGNED_OUT: OidcSnapshot = { userId: null, label: null };
 const PENDING_KEY = "t3-oidc-pending";
+/** One key per app, so a session obtained through another relay is always found and dropped. */
+export const OIDC_SESSION_STORAGE_KEY = "t3-oidc-session";
+
+/** Removes every stored session, including ones older builds keyed by provider only. */
+export function clearStoredOidcSessions(storage: {
+  readonly length: number;
+  readonly key: (index: number) => string | null;
+  readonly removeItem: (key: string) => void;
+}): void {
+  const keys: Array<string> = [];
+  for (let index = 0; index < storage.length; index += 1) {
+    const key = storage.key(index);
+    if (key === OIDC_SESSION_STORAGE_KEY || key?.startsWith(`${OIDC_SESSION_STORAGE_KEY}:`)) {
+      keys.push(key);
+    }
+  }
+  for (const key of keys) storage.removeItem(key);
+}
 
 const parseJson = <A>(value: string | null): A | null => {
   if (value === null) return null;
@@ -79,10 +104,21 @@ export function createOidcController(deps: OidcControllerDeps) {
   const now = deps.now ?? Date.now;
   const fetchImpl = deps.fetch ?? fetch;
   const withRefreshLock = deps.withRefreshLock ?? (<A>(run: () => Promise<A>) => run());
-  const storageKey = `t3-oidc-session:${deps.config.issuer}:${deps.config.clientId}`;
+  const storageKey = OIDC_SESSION_STORAGE_KEY;
+  const { relayUrl, issuer, clientId } = deps.config;
+  // Older builds keyed sessions by provider only, so nothing says which relay they were for.
+  deps.sessions.removeItem(`${storageKey}:${issuer}:${clientId}`);
 
-  const readSession = (): StoredSession | null =>
-    parseJson<StoredSession>(deps.sessions.getItem(storageKey));
+  const readSession = (): StoredSession | null => {
+    const stored = parseJson<StoredSession>(deps.sessions.getItem(storageKey));
+    if (stored === null) return null;
+    if (stored.relayUrl === relayUrl && stored.issuer === issuer && stored.clientId === clientId) {
+      return stored;
+    }
+    // A relay switch must not hand the account's tokens to the new relay.
+    deps.sessions.removeItem(storageKey);
+    return null;
+  };
   let session = readSession();
   let signOuts = 0;
   const toSnapshot = (value: StoredSession | null): OidcSnapshot =>
@@ -105,6 +141,9 @@ export function createOidcController(deps: OidcControllerDeps) {
   };
 
   const toStored = (tokens: OidcTokens): StoredSession => ({
+    relayUrl,
+    issuer,
+    clientId,
     idToken: tokens.idToken,
     refreshToken: tokens.refreshToken,
     expiresAtEpochMs: tokens.expiresAtEpochMs,

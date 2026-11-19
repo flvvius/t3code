@@ -1,11 +1,16 @@
 import { base64UrlEncode, type OidcCrypto } from "@t3tools/shared/oidc";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { createOidcController, type KeyValueStore } from "./oidcController.ts";
+import {
+  clearStoredOidcSessions,
+  createOidcController,
+  type KeyValueStore,
+} from "./oidcController.ts";
 
 const ISSUER = "https://sso.example.com/realms/t3";
 const REDIRECT_URI = "https://app.example.com/oidc/callback";
 const ALICE = `oidc:${ISSUER}|alice`;
+const RELAY_URL = "https://relay.example.com";
 
 const memoryStore = (): KeyValueStore & { readonly entries: Map<string, string> } => {
   const entries = new Map<string, string>();
@@ -37,8 +42,14 @@ interface Harness {
   tokenReply: () => Response | Promise<Response>;
 }
 
-function makeHarness(options: { readonly crypto?: OidcCrypto } = {}): Harness {
-  const sessions = memoryStore();
+function makeHarness(
+  options: {
+    readonly crypto?: OidcCrypto;
+    readonly relayUrl?: string;
+    readonly sessions?: ReturnType<typeof memoryStore>;
+  } = {},
+): Harness {
+  const { relayUrl = RELAY_URL, sessions = memoryStore(), ...overrides } = options;
   const pending = memoryStore();
   const harness: Harness = {
     sessions,
@@ -63,14 +74,14 @@ function makeHarness(options: { readonly crypto?: OidcCrypto } = {}): Harness {
   };
   return Object.assign(harness, {
     controller: createOidcController({
-      config: { issuer: ISSUER, clientId: "t3-code" },
+      config: { relayUrl, issuer: ISSUER, clientId: "t3-code" },
       redirectUri: REDIRECT_URI,
       sessions,
       pending,
       navigate: (url) => harness.navigations.push(url),
       now: () => harness.clock,
       fetch: fetchImpl as typeof fetch,
-      ...options,
+      ...overrides,
     }),
   });
 }
@@ -244,6 +255,9 @@ describe("tokens", () => {
 
   // What another tab's sign-in leaves in the storage the tabs share.
   const BOB_SESSION = {
+    relayUrl: RELAY_URL,
+    issuer: ISSUER,
+    clientId: "t3-code",
     idToken: "bob-id-token",
     refreshToken: "refresh-bob",
     expiresAtEpochMs: Number.MAX_SAFE_INTEGER,
@@ -335,5 +349,52 @@ describe("tokens", () => {
     harness.controller.syncFromStorage();
 
     expect(harness.controller.getSnapshot().userId).toBeNull();
+  });
+});
+
+describe("session binding", () => {
+  it.each([
+    ["a different relay", { relayUrl: "https://relay.attacker.example" }],
+    ["the same relay", {}],
+  ])("starts %s signed in only if the session was obtained there", async (name, options) => {
+    const first = makeHarness();
+    await signInWith(first);
+
+    const next = makeHarness({ ...options, sessions: first.sessions });
+
+    const keeps = name === "the same relay";
+    expect(next.controller.getSnapshot().userId).toBe(keeps ? ALICE : null);
+    expect(await next.controller.getToken()).toEqual(keeps ? expect.any(String) : null);
+    // The other relay's refresh token must not wait in storage for a switch back.
+    expect(next.sessions.entries.size).toBe(keeps ? 1 : 0);
+  });
+
+  it("drops a session stored before sessions named their relay", () => {
+    const sessions = memoryStore();
+    const legacyKey = `t3-oidc-session:${ISSUER}:t3-code`;
+    sessions.setItem(legacyKey, JSON.stringify({ idToken: "old", refreshToken: "old" }));
+
+    const harness = makeHarness({ sessions });
+
+    expect(harness.controller.getSnapshot().userId).toBeNull();
+    expect(sessions.entries.has(legacyKey)).toBe(false);
+  });
+
+  it("clears every stored session from storage the app no longer keeps them in", () => {
+    const entries = new Map([
+      ["t3-oidc-session", "{}"],
+      [`t3-oidc-session:${ISSUER}:t3-code`, "{}"],
+      ["t3-oidc-session:https://other.example.com:web", "{}"],
+      ["t3-connect-self-hosted-relay", "{}"],
+    ]);
+    clearStoredOidcSessions({
+      get length() {
+        return entries.size;
+      },
+      key: (index) => [...entries.keys()][index] ?? null,
+      removeItem: (key) => void entries.delete(key),
+    });
+
+    expect([...entries.keys()]).toEqual(["t3-connect-self-hosted-relay"]);
   });
 });
