@@ -46,6 +46,23 @@ export function activateCloudRelayAccount(
   });
 }
 
+/**
+ * The relay accepts the device's unregistration only with a valid token, so the device leaves
+ * before the session does; otherwise the relay keeps pushing to a signed-out phone.
+ */
+export async function signOutAndUnregisterDevice(
+  readToken: () => Promise<string | null>,
+  signOut: () => Promise<unknown>,
+): Promise<void> {
+  await runtime.runPromise(
+    unregisterAgentAwarenessDeviceForCurrentUser(readToken).pipe(
+      Effect.timeout("5 seconds"),
+      Effect.ignore,
+    ),
+  );
+  await signOut();
+}
+
 function clerkTokenReader(clerk: ClerkInstance): () => Promise<string | null> {
   return async () =>
     clerk.session ? await clerk.session.getToken(resolveRelayClerkTokenOptions()) : null;

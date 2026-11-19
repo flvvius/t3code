@@ -52,11 +52,11 @@ let controller: OidcController | null | undefined;
 /** The one controller for this app; null when the build has no OpenID Connect provider. */
 export function getMobileOidcController(): OidcController | null {
   if (controller !== undefined) return controller;
-  const { oidc } = resolveCloudPublicConfig();
+  const { oidc, relay } = resolveCloudPublicConfig();
   controller =
-    oidc.issuer && oidc.clientId
+    oidc.issuer && oidc.clientId && relay.url
       ? createOidcController({
-          config: { issuer: oidc.issuer, clientId: oidc.clientId },
+          config: { relayUrl: relay.url, issuer: oidc.issuer, clientId: oidc.clientId },
           redirectUri,
           sessions: secureSessionStore(),
           pending: memoryStore(),

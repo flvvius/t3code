@@ -11,19 +11,27 @@ import { AppText as Text } from "../../components/ui/AppText";
 import { ControlPill } from "../../components/ui/ControlPill";
 import { ListChoiceRow } from "../../components/ui/ListChoiceRow";
 import * as Dialog from "../../components/ui/Dialog";
-import { readSelfHostedRelay, saveSelfHostedRelay } from "../cloud/publicConfig";
+import { useCloudAuth } from "../cloud/cloudAuth";
+import {
+  readSelfHostedRelay,
+  resolveRelayPolicy,
+  saveSelfHostedRelay,
+} from "../cloud/publicConfig";
 import { SettingsScreen } from "./components/SettingsScreen";
 import { SettingsSection } from "./components/SettingsSection";
-
-// Sign-in and the relay client are wired once at startup, so a new choice reloads the app.
-async function switchTo(relay: SelfHostedRelay | null) {
-  await saveSelfHostedRelay(relay);
-  await reloadAppAsync("Switched the T3 Connect service");
-}
 
 /** Chooses between the build's T3 Connect and a relay the user runs themselves. */
 export function SettingsConnectServiceRouteScreen() {
   const gt = useGT();
+  const { isSignedIn, signOut } = useCloudAuth();
+  // Signing out first lets the current relay drop this phone's push registration while the
+  // session can still prove who asks. Sign-in and the relay client are wired once at startup,
+  // so a new choice reloads the app.
+  const switchTo = async (relay: SelfHostedRelay | null) => {
+    if (isSignedIn) await signOut();
+    await saveSelfHostedRelay(relay);
+    await reloadAppAsync("Switched the T3 Connect service");
+  };
   const current = readSelfHostedRelay();
   const [selfHosted, setSelfHosted] = useState(current !== null);
   const [address, setAddress] = useState(current?.relayUrl ?? "");
@@ -97,7 +105,9 @@ export function SettingsConnectServiceRouteScreen() {
                 variant="primary"
                 label={busy ? gt("Checking…") : current ? gt("Update") : gt("Use relay")}
                 disabled={busy || address.trim() === ""}
-                onPress={() => void run(() => discoverSelfHostedRelay(address))}
+                onPress={() =>
+                  void run(() => discoverSelfHostedRelay(address, { policy: resolveRelayPolicy() }))
+                }
               />
             </View>
           </View>

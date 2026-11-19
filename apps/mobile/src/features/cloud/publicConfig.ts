@@ -1,7 +1,10 @@
 import {
+  canChooseSelfHostedRelay,
   encodeSelfHostedRelay,
+  parseRelayPolicy,
   parseStoredSelfHostedRelay,
   SELF_HOSTED_RELAY_STORAGE_KEY,
+  type RelayPolicy,
   type SelfHostedRelay,
 } from "@t3tools/client-runtime/relay/self-hosted";
 import Constants from "expo-constants";
@@ -69,6 +72,18 @@ function normalizeSecureUrl(value: unknown): string | null {
   }
 }
 
+/** Which relays this build lets the user switch to (`T3CODE_RELAY_PINNED`, `T3CODE_RELAY_ALLOWLIST`). */
+export function resolveRelayPolicy(
+  extra:
+    | { readonly relay?: { readonly pinned?: unknown; readonly allowlist?: unknown } }
+    | undefined = Constants.expoConfig?.extra,
+): RelayPolicy {
+  return parseRelayPolicy({ pinned: extra?.relay?.pinned, allowlist: extra?.relay?.allowlist });
+}
+
+export const selfHostedRelayChoiceAvailable = (): boolean =>
+  canChooseSelfHostedRelay(resolveRelayPolicy());
+
 let selfHostedRelay: SelfHostedRelay | null | undefined;
 
 /** The relay the user chose in settings; it replaces the build's T3 Connect until cleared. */
@@ -77,6 +92,7 @@ export function readSelfHostedRelay(): SelfHostedRelay | null {
   try {
     selfHostedRelay = parseStoredSelfHostedRelay(
       SecureStore.getItem(SELF_HOSTED_RELAY_STORAGE_KEY),
+      resolveRelayPolicy(),
     );
   } catch {
     selfHostedRelay = null;

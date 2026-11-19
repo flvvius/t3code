@@ -7,6 +7,7 @@ import {
   cloudAccountService,
   createCloudRelayAccountService,
   deactivateCloudRelayAccount,
+  signOutAndUnregisterDevice,
 } from "./cloudAccountService";
 import { CloudAuthContext, type CloudAuth } from "./cloudAuth";
 import { getMobileOidcController } from "./oidc/mobileOidc";
@@ -50,7 +51,7 @@ function OidcAuthBridge(props: {
     userId: snapshot.userId,
     accountLabel: snapshot.label,
     getToken: props.controller.getToken,
-    signOut: props.controller.signOut,
+    signOut: () => signOutAndUnregisterDevice(props.controller.getToken, props.controller.signOut),
   };
   return <CloudAuthContext.Provider value={value}>{props.children}</CloudAuthContext.Provider>;
 }
@@ -68,7 +69,11 @@ function ClerkAuthBridge(props: { readonly children: ReactNode }) {
     userId: userId ?? null,
     accountLabel: user?.primaryEmailAddress?.emailAddress ?? null,
     getToken: () => getToken(resolveRelayClerkTokenOptions()),
-    signOut: () => signOut(),
+    signOut: () =>
+      signOutAndUnregisterDevice(
+        () => getToken(resolveRelayClerkTokenOptions()),
+        () => signOut(),
+      ),
   };
   return <CloudAuthContext.Provider value={value}>{props.children}</CloudAuthContext.Provider>;
 }
