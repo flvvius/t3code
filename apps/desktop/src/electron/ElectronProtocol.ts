@@ -1,5 +1,6 @@
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Base64 from "effect/encoding/Base64";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -66,19 +67,39 @@ export class ElectronProtocol extends Context.Service<
   }
 >()("@t3tools/desktop/electron/ElectronProtocol") {}
 
-function makeDesktopContentSecurityPolicy(input: DesktopProtocolRegistrationInput): string {
+const INLINE_SCRIPT = /<script\b(?![^>]*\bsrc\s*=)[^>]*>([\s\S]*?)<\/script\s*>/giu;
+
+/** CSP sources for exactly the inline scripts the bundled HTML ships, so no injected one runs. */
+export async function inlineScriptHashSources(html: string): Promise<ReadonlyArray<string>> {
+  return Promise.all(
+    Array.from(html.matchAll(INLINE_SCRIPT), async ([, body = ""]) => {
+      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body));
+      return `'sha256-${Base64.encode(new Uint8Array(digest))}'`;
+    }),
+  );
+}
+
+/**
+ * `inlineScripts` lists the hashes of the inline scripts the page may run. The dev server injects
+ * its own inline scripts, so it is proxied with `'unsafe-inline'`.
+ */
+function makeDesktopContentSecurityPolicy(
+  input: DesktopProtocolRegistrationInput,
+  inlineScripts: ReadonlyArray<string> | "unsafe-inline",
+): string {
   const clerkOrigin = input.clerkFrontendApiHostname
     ? `https://${input.clerkFrontendApiHostname}`
     : undefined;
   const scriptSources = [
     "'self'",
-    "'unsafe-inline'",
+    ...(inlineScripts === "unsafe-inline" ? ["'unsafe-inline'"] : inlineScripts),
     "'wasm-unsafe-eval'",
     ...(clerkOrigin ? [clerkOrigin] : []),
     "https://challenges.cloudflare.com",
   ];
 
-  // User-configured environment origins are unknown here, so allow supported network schemes.
+  // Environments are user-configured LAN, tailnet and relay addresses (often plain http/ws), so
+  // connections cannot be narrowed to known origins here.
   // GLTFLoader fetches embedded textures through blob URLs.
   const connectSources = ["'self'", "blob:", "http:", "https:", "ws:", "wss:"];
 
@@ -251,20 +272,29 @@ export const make = Effect.gen(function* () {
     function* (input: DesktopProtocolRegistrationInput) {
       if (yield* Ref.get(registered)) return;
 
-      const contentSecurityPolicy = makeDesktopContentSecurityPolicy(input);
-
       yield* Effect.acquireRelease(
         Effect.try({
           try: () => {
             Electron.protocol.handle(input.scheme, async (request) => {
               if ("assetDirectory" in input) {
+                const response = await runPromise(
+                  serveDesktopAsset(request, input.assetDirectory),
+                );
+                const isHtml = response.headers.get("content-type")?.startsWith("text/html");
+                const inlineScripts = isHtml
+                  ? await inlineScriptHashSources(await response.clone().text())
+                  : [];
                 return withContentSecurityPolicy(
-                  await runPromise(serveDesktopAsset(request, input.assetDirectory)),
-                  contentSecurityPolicy,
+                  response,
+                  makeDesktopContentSecurityPolicy(input, inlineScripts),
                 );
               }
               return runPromise(
-                proxyRequest(request, input.targetOrigin, contentSecurityPolicy).pipe(
+                proxyRequest(
+                  request,
+                  input.targetOrigin,
+                  makeDesktopContentSecurityPolicy(input, "unsafe-inline"),
+                ).pipe(
                   Effect.catchTags({
                     ElectronProtocolFetchError: (error) => Effect.die(error.cause),
                   }),
