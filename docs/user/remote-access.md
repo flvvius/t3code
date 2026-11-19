@@ -107,8 +107,8 @@ A self-hosted relay has no managed tunnels. If the relay sets
 through the relay itself, so there is nothing to expose. Otherwise your other
 devices reach it only at an HTTPS address you expose yourself, such as a reverse
 proxy or [Tailscale HTTPS](#tailscale-https): start the host with that address in
-`T3CODE_PUBLIC_URL`. Tailscale and LAN addresses also need
-`RELAY_MANUAL_ENDPOINTS=private` on the relay.
+`T3CODE_PUBLIC_URL`. The relay must allow such addresses with
+`RELAY_MANUAL_ENDPOINTS=public`, or `private` for Tailscale and LAN addresses.
 
 For a command-line host, set the relay before `t3 connect`:
 
