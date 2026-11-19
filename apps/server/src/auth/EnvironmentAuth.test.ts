@@ -7,9 +7,11 @@ import {
 } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as ServerConfig from "../config.ts";
 import { makeDpopKey } from "./dpop.testkit.ts";
@@ -413,6 +415,98 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodePlatformCrypto.layer))(
             (yield* serverAuth.listPairingLinks()).some((link) => link.connectDeviceRequest),
           ).toBe(false);
         }).pipe(Effect.provide(layerEnvironmentAuth())),
+    );
+
+    it.effect("forgets every T3 Connect device and session when the link goes away", () =>
+      Effect.gen(function* () {
+        const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+        const trustedKey = "Kq3vZ8sYbTn0eW1pLr5uXc7dHf9gJm2aQs4tVw6yBzE";
+        const waitingKey = "Zp8rT2nVbQ5xWk1mLc7dHf9gJs3aYe4uRt6vXw0yBzE";
+        const owner = yield* serverAuth.issueSession({ label: "Owner" });
+        const exchange = (credential: string, proofKeyThumbprint: string) =>
+          serverAuth.exchangeBootstrapCredentialForAccessToken(
+            credential,
+            undefined,
+            requestMetadata,
+            { proofKeyThumbprint },
+          );
+        const minted = yield* serverAuth.issueConnectCredential({
+          proofKeyThumbprint: trustedKey,
+          requireApproval: false,
+        });
+        yield* exchange(minted.credential, trustedKey);
+        const unspent = yield* serverAuth.issueConnectCredential({
+          proofKeyThumbprint: trustedKey,
+          requireApproval: false,
+        });
+        yield* serverAuth.issueConnectCredential({
+          proofKeyThumbprint: waitingKey,
+          requireApproval: true,
+        });
+
+        expect(yield* serverAuth.revokeConnectEnrollments()).toBe(2);
+
+        expect(yield* serverAuth.listConnectDevices()).toEqual([]);
+        expect(yield* serverAuth.listPairingLinks()).toEqual([]);
+        expect(
+          (yield* serverAuth.listSessions()).map((session) => session.sessionId),
+        ).toEqual([owner.sessionId]);
+        expect((yield* exchange(unspent.credential, trustedKey).pipe(Effect.flip))._tag).toBe(
+          "ServerAuthInvalidCredentialError",
+        );
+        // On the next link the device is new again and waits for approval.
+        const relinked = yield* serverAuth.issueConnectCredential({
+          proofKeyThumbprint: trustedKey,
+          requireApproval: true,
+        });
+        expect((yield* exchange(relinked.credential, trustedKey).pipe(Effect.flip))._tag).toBe(
+          "ServerAuthConnectApprovalPendingError",
+        );
+      }).pipe(Effect.provide(layerEnvironmentAuth())),
+    );
+
+    it.effect("asks a T3 Connect device for approval again once its trust lapses", () =>
+      Effect.gen(function* () {
+        const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+        const deviceKey = "Kq3vZ8sYbTn0eW1pLr5uXc7dHf9gJm2aQs4tVw6yBzE";
+        const approveWaitingDevice = Effect.gen(function* () {
+          const issued = yield* serverAuth.issueConnectCredential({
+            proofKeyThumbprint: deviceKey,
+            requireApproval: true,
+          });
+          const [request] = (yield* serverAuth.listPairingLinks()).filter(
+            (link) => link.connectDeviceRequest !== undefined,
+          );
+          expect(yield* serverAuth.approveConnectDevice(request!.id)).toBe(true);
+          yield* serverAuth.exchangeBootstrapCredentialForAccessToken(
+            issued.credential,
+            undefined,
+            requestMetadata,
+            { proofKeyThumbprint: deviceKey },
+          );
+        });
+        const mintWaits = serverAuth
+          .issueConnectCredential({ proofKeyThumbprint: deviceKey, requireApproval: true })
+          .pipe(
+            Effect.andThen(serverAuth.listPairingLinks()),
+            Effect.map((links) => links.some((link) => link.connectDeviceRequest !== undefined)),
+          );
+
+        yield* approveWaitingDevice;
+        yield* TestClock.adjust(Duration.days(6));
+        expect(yield* mintWaits).toBe(false);
+
+        yield* TestClock.adjust(Duration.days(2));
+        expect(yield* serverAuth.listConnectDevices()).toEqual([]);
+        expect(yield* mintWaits).toBe(true);
+
+        // Approving again starts a new week.
+        yield* approveWaitingDevice;
+        expect(
+          (yield* serverAuth.listConnectDevices()).map((device) => device.proofKeyThumbprint),
+        ).toEqual([deviceKey]);
+        expect(yield* mintWaits).toBe(false);
+      }).pipe(Effect.provide(layerEnvironmentAuth())),
     );
 
     it.effect("preserves pairing grants after rejecting scopes they do not grant", () =>

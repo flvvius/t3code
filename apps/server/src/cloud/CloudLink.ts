@@ -253,6 +253,7 @@ const INTERNAL_OPERATION_MESSAGES = {
   "persist-recovered-tunnel": "Could not persist the recovered managed tunnel configuration.",
   "read-relay-config": "Could not read environment relay configuration.",
   "remove-relay-config": "Could not remove environment relay configuration.",
+  "revoke-connect-devices": "Could not revoke the devices T3 Connect enrolled.",
   "update-webhook-settings": "Could not update T3 Connect webhook settings.",
   "read-preferences": "Could not read environment cloud preferences.",
   "persist-preferences": "Could not persist environment cloud preferences.",
@@ -1389,6 +1390,10 @@ const make = Effect.gen(function* () {
       return yield* endpointRuntime.withLinkStateLock(
         Effect.gen(function* () {
           const endpointRuntimeStatus = yield* endpointRuntime.applyConfig(null);
+          // Devices came in through this link; they must not outlive it or carry over to the next.
+          yield* environmentAuth
+            .revokeConnectEnrollments()
+            .pipe(Effect.catch(internalError("revoke-connect-devices")));
           yield* Effect.all(
             [
               secrets.remove(CLOUD_LINKED_USER_ID),

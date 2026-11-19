@@ -331,6 +331,7 @@ it.effect("unlinks on startup and refuses to link when the policy turns Connect 
       [RELAY_URL_SECRET, encode("https://relay.test")],
     ]);
     const appliedConfigs: Array<unknown> = [];
+    let enrollmentRevocations = 0;
     const layerDependencies = Layer.mergeAll(
       ServerSettings.ServerSettingsService.layerTest(),
       Layer.mock(ServerSecretStore.ServerSecretStore)({
@@ -354,7 +355,9 @@ it.effect("unlinks on startup and refuses to link when the policy turns Connect 
         limits: { connect: false },
       }),
       Layer.mock(ConnectReachability.ConnectReachability)({}),
-      Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
+      Layer.mock(EnvironmentAuth.EnvironmentAuth)({
+        revokeConnectEnrollments: () => Effect.sync(() => ++enrollmentRevocations),
+      }),
       Layer.mock(CliTokenManager.CloudCliTokenManager)({}),
       Layer.mock(HttpServer.HttpServer)({
         address: NetAddress.inetAddressFromIpStringUnsafe("127.0.0.1", 3773),
@@ -371,6 +374,8 @@ it.effect("unlinks on startup and refuses to link when the policy turns Connect 
       const link = yield* CloudLink.CloudLink;
       assert.isFalse(stored.has(CLOUD_LINKED_USER_ID));
       assert.deepEqual(appliedConfigs, [null]);
+      // Unlinking also ends what the link let in.
+      assert.equal(enrollmentRevocations, 1);
 
       const applyError = yield* link.applyRelayConfig({} as never).pipe(Effect.flip);
       const mintError = yield* link.mintCredential({} as never).pipe(Effect.flip);

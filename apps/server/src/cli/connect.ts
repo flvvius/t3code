@@ -509,12 +509,32 @@ const reportCloudDisconnectResults = Effect.fn("cloud.cli.report_disconnect_resu
   },
 );
 
+const revokeConnectEnrollments = Effect.gen(function* () {
+  const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
+  const revoked = yield* environmentAuth.revokeConnectEnrollments();
+  if (revoked > 0) {
+    yield* Console.log("Revoked the devices and sessions that came in through T3 Connect.");
+  }
+}).pipe(
+  Effect.catch((cause) =>
+    Effect.logWarning("Could not revoke T3 Connect devices.", { cause }).pipe(
+      Effect.andThen(
+        Console.warn(
+          "Could not revoke the devices that came in through T3 Connect.\nRevoke them with `t3 auth connect-device revoke <code>`.",
+        ),
+      ),
+    ),
+  ),
+);
+
 export const disconnectCloud = Effect.fn("cloud.cli.disconnect")(function* (options: {
   readonly clearAuthorization: boolean;
 }) {
   yield* CliState.setCliDesiredCloudLink(false);
   const liveResult = yield* runLiveCloudUnlink();
   const relayResult = yield* Effect.exit(unlinkRelayEnvironment());
+  // The live server already did this; a stopped one cannot, and its next start must not let them in.
+  yield* revokeConnectEnrollments;
   yield* CliState.clearPersistedCloudLink;
 
   if (options.clearAuthorization) {
@@ -627,6 +647,7 @@ const linkEnvironmentForConnect = Effect.fn("cloud.cli.link_environment")(functi
   yield* CliState.setCliDesiredCloudLink(true, publishOnly ? "publish_only" : "managed");
   if (yield* CliState.dropRevokedCloudLink) {
     yield* Console.log("Replacing the link T3 Connect revoked.");
+    yield* revokeConnectEnrollments;
   }
   if (publishOnly) {
     const secrets = yield* ServerSecretStore.ServerSecretStore;

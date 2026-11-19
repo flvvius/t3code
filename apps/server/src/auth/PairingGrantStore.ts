@@ -16,6 +16,7 @@ import {
   DESKTOP_BOOTSTRAP_TOKEN_WINDOW_MS,
   isValidDesktopBootstrapToken,
 } from "@t3tools/shared/desktopBootstrapToken";
+import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
@@ -350,11 +351,27 @@ const PAIRING_TOKEN_PATTERN = new RegExp(
   "i",
 );
 
+/**
+ * Days a T3 Connect device stays approved before it must ask again; 0 keeps it approved. A
+ * relay-enrolled key otherwise outlives the person who enrolled it, so the default is a week.
+ */
+const ConnectDeviceTrustDaysConfig = Config.Number("T3CODE_CONNECT_DEVICE_TRUST_DAYS").pipe(
+  Config.withDefault(7),
+);
+
 const make = Effect.gen(function* () {
   const random = yield* SecureRandom.SecureRandom;
   const config = yield* ServerConfig.ServerConfig;
   const pairingLinks = yield* AuthPairingLinks.AuthPairingLinkRepository;
   const connectDevices = yield* AuthConnectDevices.AuthConnectDeviceRepository;
+  const connectDeviceTrustDays = yield* ConnectDeviceTrustDaysConfig;
+  const connectTrustedSince = DateTime.now.pipe(
+    Effect.map((now) =>
+      connectDeviceTrustDays > 0
+        ? DateTime.subtract(now, { days: connectDeviceTrustDays })
+        : null,
+    ),
+  );
   const seededGrantsRef = yield* Ref.make(new Map<string, StoredBootstrapGrant>());
   const changesPubSub = yield* PubSub.unbounded<BootstrapCredentialChange>();
   const generatePairingToken = Effect.gen(function* () {
@@ -760,8 +777,9 @@ const make = Effect.gen(function* () {
     "PairingGrantStore.trustConnectDevice",
   )(function* (proofKeyThumbprint, client) {
     const approvedAt = yield* DateTime.now;
+    const trustedSince = yield* connectTrustedSince;
     yield* connectDevices
-      .trust({ proofKeyThumbprint, client, approvedAt })
+      .trust({ proofKeyThumbprint, client, approvedAt, trustedSince })
       .pipe(Effect.mapError((cause) => new ConnectDevicesError({ operation: "trust", cause })));
     yield* emitConnectDevicesChanged;
   });
@@ -785,6 +803,7 @@ const make = Effect.gen(function* () {
         proofKeyThumbprint: row.value.proofKeyThumbprint,
         client: row.value.requestedClient,
         approvedAt: now,
+        trustedSince: yield* connectTrustedSince,
       })
       .pipe(Effect.mapError((cause) => new ConnectDevicesError({ operation: "trust", cause })));
     yield* emitRemoved(pairingLinkId);
@@ -792,15 +811,23 @@ const make = Effect.gen(function* () {
     return true;
   });
 
-  const isConnectDeviceTrusted: PairingGrantStore["Service"]["isConnectDeviceTrusted"] = (
-    proofKeyThumbprint,
-  ) =>
-    connectDevices
-      .isTrusted(proofKeyThumbprint)
-      .pipe(Effect.mapError((cause) => new BootstrapCredentialLookupError({ cause })));
+  const isConnectDeviceTrusted: PairingGrantStore["Service"]["isConnectDeviceTrusted"] = Effect.fn(
+    "PairingGrantStore.isConnectDeviceTrusted",
+  )(
+    function* (proofKeyThumbprint) {
+      const trustedSince = yield* connectTrustedSince;
+      // Lapsed rows go first: a waiting request counts as approved while its key has a row.
+      const lapsed = yield* connectDevices.removeLapsed({ trustedSince });
+      if (lapsed > 0) yield* emitConnectDevicesChanged;
+      return yield* connectDevices.isTrusted({ proofKeyThumbprint, trustedSince });
+    },
+    Effect.mapError((cause) => new BootstrapCredentialLookupError({ cause })),
+  );
 
+  // A lapsed device is left out: it asks for approval again, like a new one.
   const listConnectDevices: PairingGrantStore["Service"]["listConnectDevices"] = () =>
-    connectDevices.list().pipe(
+    connectTrustedSince.pipe(
+      Effect.flatMap((trustedSince) => connectDevices.list({ trustedSince })),
       Effect.map((rows) =>
         rows.map((row): AuthConnectDevice => ({
           proofKeyThumbprint: row.proofKeyThumbprint,

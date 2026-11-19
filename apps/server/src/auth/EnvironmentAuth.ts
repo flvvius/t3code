@@ -557,6 +557,11 @@ export class EnvironmentAuth extends Context.Service<
     readonly revokeConnectDevice: (
       proofKeyThumbprint: string,
     ) => Effect.Effect<boolean, ServerAuthInternalError>;
+    /**
+     * Forgets every device T3 Connect enrolled and ends its sessions and unspent credentials,
+     * for when the link they came through goes away. Returns how many devices and sessions went.
+     */
+    readonly revokeConnectEnrollments: () => Effect.Effect<number, ServerAuthInternalError>;
     readonly issuePairingCredential: (
       input?: AuthCreatePairingCredentialInput,
     ) => Effect.Effect<
@@ -1275,6 +1280,29 @@ export const make = Effect.gen(function* () {
     }).pipe(connectTrustLock.withPermits(1));
   });
 
+  const revokeConnectEnrollments: EnvironmentAuth["Service"]["revokeConnectEnrollments"] =
+    Effect.fn("EnvironmentAuth.revokeConnectEnrollments")(function* () {
+      return yield* Effect.gen(function* () {
+        const devices = yield* bootstrapCredentials
+          .revokeConnectDevicesExcept(null)
+          .pipe(Effect.mapError((cause) => new ServerAuthConnectDevicesError({ cause })));
+        const connectSessions = (yield* sessions
+          .listActive()
+          .pipe(Effect.mapError((cause) => new ServerAuthSessionRevocationError({ cause })))).filter(
+          (session) => session.subject === CLOUD_CONNECT_SUBJECT,
+        );
+        yield* Effect.forEach(
+          connectSessions,
+          (session) =>
+            sessions
+              .revoke(session.sessionId)
+              .pipe(Effect.mapError((cause) => new ServerAuthSessionRevocationError({ cause }))),
+          { discard: true },
+        );
+        return devices + connectSessions.length;
+      }).pipe(connectTrustLock.withPermits(1));
+    });
+
   const revokeConnectDeviceByCode: EnvironmentAuth["Service"]["revokeConnectDeviceByCode"] =
     Effect.fn("EnvironmentAuth.revokeConnectDeviceByCode")(function* (verificationCode) {
       const wanted = normalizeVerificationCode(verificationCode);
@@ -1618,6 +1646,7 @@ export const make = Effect.gen(function* () {
     listConnectDevices,
     revokeConnectDevice,
     revokeConnectDeviceByCode,
+    revokeConnectEnrollments,
     issuePairingCredential,
     issueStartupPairingCredential,
     listPairingLinks,

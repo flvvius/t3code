@@ -58,8 +58,12 @@ headless host, run `t3 auth connect-device list` and then
 and the device asks again when it retries. Deny keeps that device out until its
 request expires.
 
-Each device is approved once. Revoke it from **T3 Connect devices** in the same
-settings page, or with `t3 auth connect-device revoke <code>`. With approval on,
+An approval lasts 7 days; then the device asks again. Set
+`T3CODE_CONNECT_DEVICE_TRUST_DAYS` on the host to change that, or `0` to keep
+approvals until revoked. Unlinking the host from T3 Connect revokes every device
+that came in through it and ends their sessions. Revoke a single device from
+**T3 Connect devices** in the same settings page, or with
+`t3 auth connect-device revoke <code>`. With approval on,
 it has to ask again. With approval off, it can connect again on its own, so
 revoking in the app offers to turn approval on first. Devices that connected through T3 Connect while approval was off stay
 approved and appear in that list for you to review. A device that has not
