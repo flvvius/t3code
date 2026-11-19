@@ -1,4 +1,4 @@
-import type * as Dns from "node:dns";
+import type * as NodeDns from "node:dns";
 
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -11,7 +11,7 @@ import {
 } from "./manualEndpointClient.ts";
 
 const lookupWith =
-  (addresses: ReadonlyArray<Dns.LookupAddress>, policy: "public" | "private" = "public") =>
+  (addresses: ReadonlyArray<NodeDns.LookupAddress>, policy: "public" | "private" = "public") =>
   (all: boolean) =>
     new Promise<{ error: Error | null; result: unknown }>((resolve) =>
       makeGuardedLookup(policy, (_hostname, _options, callback) => callback(null, [...addresses]))(

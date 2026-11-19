@@ -374,7 +374,7 @@ const make = Effect.gen(function* () {
             });
           }),
         )
-        .pipe(Effect.catchTag("SqlError", (error) => Effect.fail(persistenceFailed(error))));
+        .pipe(Effect.catchTags({ SqlError: (error) => Effect.fail(persistenceFailed(error)) }));
       return {
         environmentId: verified.environmentId,
         endpoint,

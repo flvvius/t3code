@@ -15,7 +15,12 @@ import {
 export class OffboardPersistenceError extends Schema.TaggedError<OffboardPersistenceError>()(
   "OffboardPersistenceError",
   {
-    stage: Schema.Literals(["revoke-links", "delete-devices", "delete-live-activities"]),
+    stage: Schema.Literals([
+      "transaction",
+      "revoke-links",
+      "delete-devices",
+      "delete-live-activities",
+    ]),
     cause: Schema.Defect(),
   },
 ) {
@@ -86,7 +91,7 @@ export const offboardOidcSubject = Effect.fn("relay.offboard_oidc_subject")(func
         } satisfies OffboardResult;
       }),
     )
-    .pipe(Effect.catchTag("SqlError", (cause) => Effect.fail(failed("revoke-links")(cause))));
+    .pipe(Effect.catchTags({ SqlError: (cause) => Effect.fail(failed("transaction")(cause)) }));
 });
 
 /**

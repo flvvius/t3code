@@ -1,6 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off - the guard must see the addresses Node's own sockets dial.
-import * as Dns from "node:dns";
-import * as Net from "node:net";
+import * as NodeDns from "node:dns";
+import * as NodeNet from "node:net";
 
 import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 import * as Effect from "effect/Effect";
@@ -13,7 +13,7 @@ export type EndpointAddressPolicy = "public" | "private";
 export type EndpointAddressRejection = "internal_address" | "private_network";
 
 const blockList = (ranges: ReadonlyArray<readonly [string, number, "ipv4" | "ipv6"]>) => {
-  const list = new Net.BlockList();
+  const list = new NodeNet.BlockList();
   for (const [network, prefix, family] of ranges) list.addSubnet(network, prefix, family);
   return list;
 };
@@ -58,14 +58,14 @@ export function endpointAddressRejection(
   address: string,
   policy: EndpointAddressPolicy,
 ): EndpointAddressRejection | null {
-  const family = Net.isIP(address);
+  const family = NodeNet.isIP(address);
   if (family === 0) return "internal_address";
   const type = family === 4 ? "ipv4" : "ipv6";
   if (INTERNAL.check(address, type)) return "internal_address";
   return policy === "public" && PRIVATE.check(address, type) ? "private_network" : null;
 }
 
-export const isIpAddress = (value: string) => Net.isIP(value) !== 0;
+export const isIpAddress = (value: string) => NodeNet.isIP(value) !== 0;
 
 export class EndpointAddressBlocked extends Schema.TaggedError<EndpointAddressBlocked>()(
   "EndpointAddressBlocked",
@@ -85,8 +85,8 @@ const blocked = (hostname: string, address: string, rejection: EndpointAddressRe
 
 type Resolve = (
   hostname: string,
-  options: Dns.LookupAllOptions,
-  callback: (error: NodeJS.ErrnoException | null, addresses: Array<Dns.LookupAddress>) => void,
+  options: NodeDns.LookupAllOptions,
+  callback: (error: NodeJS.ErrnoException | null, addresses: Array<NodeDns.LookupAddress>) => void,
 ) => void;
 
 /**
@@ -94,7 +94,7 @@ type Resolve = (
  * socket then dials the address checked here, so a second DNS answer cannot swap it.
  */
 export const makeGuardedLookup =
-  (policy: EndpointAddressPolicy, resolve: Resolve = Dns.lookup): Net.LookupFunction =>
+  (policy: EndpointAddressPolicy, resolve: Resolve = NodeDns.lookup): NodeNet.LookupFunction =>
   (hostname, options, callback) => {
     resolve(hostname, { ...options, all: true }, (error, addresses) => {
       if (error) return callback(error, "", 0);
@@ -130,7 +130,7 @@ export const makeManualEndpointHttpClient = Effect.fn("relay.node.manual_endpoin
       const rejection =
         url?.protocol !== "https:"
           ? "internal_address"
-          : Net.isIP(hostname) === 0
+          : NodeNet.isIP(hostname) === 0
             ? null
             : endpointAddressRejection(hostname, policy);
       return rejection === null
