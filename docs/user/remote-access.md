@@ -117,6 +117,13 @@ proxy or [Tailscale HTTPS](#tailscale-https): start the host with that address i
 `T3CODE_PUBLIC_URL`. Tailscale and LAN addresses also need
 `RELAY_MANUAL_ENDPOINTS=private` on the relay.
 
+A relay channel gives approved devices remote control of the host, even when it
+only listens on localhost. `t3 connect link --publish-only` skips the managed
+tunnel but keeps that channel. To only publish agent activity, with no remote
+control through T3 Connect, run `t3 connect link --activity-only`, or start the
+host with `T3CODE_RELAY_REMOTE_CONTROL=false` to refuse channels for every link.
+`t3 connect status` shows which one applies.
+
 For a command-line host, set the relay before `t3 connect`:
 
 ```bash

@@ -2,6 +2,7 @@ import {
   RelayManagedEndpointOrigin,
   RelayManagedEndpointRuntimeConfig,
 } from "@t3tools/contracts/relay";
+import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -18,6 +19,23 @@ export const RELAY_ENVIRONMENT_CREDENTIAL_SECRET = "cloud-relay-environment-cred
 export const PUBLISH_AGENT_ACTIVITY_SECRET = "cloud-publish-agent-activity";
 export const HOLD_WEBHOOKS_WHILE_OFFLINE_SECRET = "cloud-hold-webhooks-while-offline";
 export const CLOUD_LINK_REVOKED = "cloud-link-revoked";
+/** Set by an activity-only link: the relay may receive activity but never carry remote control. */
+export const RELAY_REMOTE_CONTROL_OFF_SECRET = "cloud-relay-remote-control-off";
+
+/**
+ * Whether this host lets a relay channel carry remote control. `T3CODE_RELAY_REMOTE_CONTROL=false`
+ * turns it off for every link; an activity-only link turns it off for that link.
+ */
+export const readRelayRemoteControlAllowed = Effect.gen(function* () {
+  const allowedByEnvironment = yield* Config.Boolean("T3CODE_RELAY_REMOTE_CONTROL").pipe(
+    Config.withDefault(true),
+    // A value that does not parse fails closed.
+    Effect.orElseSucceed(() => false),
+  );
+  if (!allowedByEnvironment) return false;
+  const secrets = yield* ServerSecretStore.ServerSecretStore;
+  return Option.isNone(yield* secrets.get(RELAY_REMOTE_CONTROL_OFF_SECRET));
+});
 
 export const encodeEndpointRuntimeConfigJson = Schema.encodeEffect(
   Schema.fromJsonString(RelayManagedEndpointRuntimeConfig),
