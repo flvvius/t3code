@@ -7,7 +7,7 @@ import * as HttpServerRequest from "effect/http/HttpServerRequest";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Redacted from "effect/Redacted";
-import type * as Scope from "effect/Scope";
+import * as Scope from "effect/Scope";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 
 import type * as RelayDb from "../db.ts";
@@ -15,6 +15,7 @@ import * as HookForwarder from "../hooks/HookForwarder.ts";
 import * as HookInbox from "../hooks/HookInbox.ts";
 import * as ManagedEndpointProvider from "../environments/ManagedEndpointProvider.ts";
 import * as MobileTelemetry from "../mobileTelemetry/MobileTelemetry.ts";
+import { makeManualEndpointHttpClient } from "./manualEndpointClient.ts";
 import * as Ports from "./ports.ts";
 import type { RelayHost } from "./RelayHost.ts";
 
@@ -59,6 +60,7 @@ interface QueuedJob {
 // Self-hosted relay: queues and rate limits live in this process, so pending pushes do not
 // survive a restart. Cron supports only `*/N * * * *`, the one schedule the relay uses.
 const MINUTE_STEP_CRON = /^\*\/(\d+) \* \* \* \*$/;
+const MAX_QUEUED_DELIVERY_JOBS = 10_000;
 
 export const fixedWindowLimit = (limit: number, periodSeconds: number) => {
   const windows = new Map<string, { readonly windowStart: number; count: number }>();
@@ -163,12 +165,19 @@ const inertHookInbox = Layer.succeed(HookInbox.HookInbox, {
  */
 export const makeNodeHost = Effect.fn("relay.node.host")(function* (options: NodeHostOptions) {
   const random = yield* SecureRandom.SecureRandom;
-  const apnsQueue = yield* Queue.unbounded<QueuedJob>();
-  const fcmQueue = yield* Queue.unbounded<QueuedJob>();
+  const scope = yield* Effect.scope;
+  // Pushes are best effort: past this backlog a new one is dropped rather than held in memory.
+  const apnsQueue = yield* Queue.dropping<QueuedJob>(MAX_QUEUED_DELIVERY_JOBS);
+  const fcmQueue = yield* Queue.dropping<QueuedJob>(MAX_QUEUED_DELIVERY_JOBS);
   const queueFor = (name: "apns" | "fcm") => (name === "apns" ? apnsQueue : fcmQueue);
 
   const senderFor = (queue: Queue.Queue<QueuedJob>): Ports.DeliveryQueueSender<unknown> => ({
-    send: (body) => Queue.offer(queue, { body, attempts: 0 }).pipe(Effect.asVoid),
+    send: (body) =>
+      Queue.offer(queue, { body, attempts: 0 }).pipe(
+        Effect.flatMap((accepted) =>
+          accepted ? Effect.void : Effect.logWarning("Dropping relay delivery job: queue is full"),
+        ),
+      ),
   });
 
   const hookLimit = fixedWindowLimit(
@@ -205,6 +214,8 @@ export const makeNodeHost = Effect.fn("relay.node.host")(function* (options: Nod
       Layer.succeed(ManagedEndpointProvider.ManagedEndpointDnsClient, inertDnsClient),
     ),
     hookInbox: inertHookInbox,
+    manualEndpointHttpClient: (policy) =>
+      makeManualEndpointHttpClient(policy).pipe(Effect.provideService(Scope.Scope, scope)),
     rateLimits: {
       hook: hookLimit,
       hookEndpoint: hookEndpointLimit,

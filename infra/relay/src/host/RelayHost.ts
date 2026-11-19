@@ -42,6 +42,13 @@ export interface RelayHost<R = never> {
     CloudflareApiPause.CloudflareApiPause | HttpClient.HttpClient
   >;
   readonly hookInbox: Layer.Layer<HookInbox.HookInbox>;
+  /**
+   * Reaches endpoints environments declare themselves only at addresses the policy allows,
+   * checked where the name resolves. Hosts without one use their default client.
+   */
+  readonly manualEndpointHttpClient?: (
+    policy: "public" | "private",
+  ) => Effect.Effect<HttpClient.HttpClient>;
   /** Each limiter may fail; the composition decides to fail open. */
   readonly rateLimits: {
     readonly hook: (key: string) => Effect.Effect<boolean, Ports.RateLimitUnavailableError>;
