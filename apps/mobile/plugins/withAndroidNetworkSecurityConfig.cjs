@@ -2,18 +2,23 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { withAndroidManifest, withDangerousMod } = require("expo/config-plugins");
 
-// Environments behind a private CA installed in the user store must work like they do in Chrome.
-// Android ignores usesCleartextTraffic once a network security config exists, so permit it here.
-const NETWORK_SECURITY_CONFIG = `<?xml version="1.0" encoding="utf-8"?>
+/**
+ * Release builds trust only system CAs over HTTPS. `allowCleartext` permits http:// (direct LAN
+ * environments and Metro need it); `trustUserCertificates` trusts CAs installed in the user store
+ * (environments behind a private CA). Android ignores usesCleartextTraffic once this config
+ * exists, so cleartext is decided here.
+ */
+function networkSecurityConfig({ allowCleartext, trustUserCertificates }) {
+  return `<?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-  <base-config cleartextTrafficPermitted="true">
+  <base-config cleartextTrafficPermitted="${allowCleartext ? "true" : "false"}">
     <trust-anchors>
       <certificates src="system" />
-      <certificates src="user" />
-    </trust-anchors>
+${trustUserCertificates ? '      <certificates src="user" />\n' : ""}    </trust-anchors>
   </base-config>
 </network-security-config>
 `;
+}
 
 function withNetworkSecurityConfigManifest(config) {
   return withAndroidManifest(config, (nextConfig) => {
@@ -32,7 +37,7 @@ function withNetworkSecurityConfigManifest(config) {
   });
 }
 
-function withNetworkSecurityConfigResource(config) {
+function withNetworkSecurityConfigResource(config, options) {
   return withDangerousMod(config, [
     "android",
     async (config) => {
@@ -45,12 +50,19 @@ function withNetworkSecurityConfigResource(config) {
         "xml",
       );
       fs.mkdirSync(xmlDir, { recursive: true });
-      fs.writeFileSync(path.join(xmlDir, "network_security_config.xml"), NETWORK_SECURITY_CONFIG);
+      fs.writeFileSync(
+        path.join(xmlDir, "network_security_config.xml"),
+        networkSecurityConfig(options),
+      );
       return config;
     },
   ]);
 }
 
-module.exports = function withAndroidNetworkSecurityConfig(config) {
-  return withNetworkSecurityConfigResource(withNetworkSecurityConfigManifest(config));
+module.exports = function withAndroidNetworkSecurityConfig(config, options = {}) {
+  const resolved = {
+    allowCleartext: options.allowCleartext === true,
+    trustUserCertificates: options.trustUserCertificates === true,
+  };
+  return withNetworkSecurityConfigResource(withNetworkSecurityConfigManifest(config), resolved);
 };

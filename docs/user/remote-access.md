@@ -97,6 +97,10 @@ Connect provider instead of a T3 account. Set up the relay first with
 On each web, desktop, and mobile app, open **Settings → Connections → T3 Connect
 service**, choose **Self-hosted relay**, and enter the relay's address. The app
 reads the sign-in provider from the relay, reloads, and asks you to sign in.
+Every switch signs you out, so a relay never receives a sign-in made for another.
+An organization's build may hide this choice or accept only its own relays.
+In a browser, the sign-in lasts for the tab: a new tab or browser session signs
+in again.
 Choose **T3 Connect** there to switch back. Environments you linked through your
 relay stay linked to it until you turn T3 Connect off and on again. To remove
 one from your relay account, choose **Linked environments → Manage** there, or

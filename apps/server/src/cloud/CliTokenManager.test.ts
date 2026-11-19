@@ -22,6 +22,7 @@ const TEST_ENV = {
   T3CODE_CLERK_PUBLISHABLE_KEY: "pk_test_Y2xlcmsuZXhhbXBsZS50ZXN0JA==",
   T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: "oauth_client_test",
   T3CODE_HOSTED_APP_URL: "https://hosted.example.test",
+  T3CODE_RELAY_URL: "https://relay.example.test",
 };
 
 interface RecordedTokenRequest {
@@ -107,8 +108,14 @@ const layerDeviceFlow = (server: DeviceFlowServer) =>
 const tokenRequests = (requests: ReadonlyArray<RecordedTokenRequest>) =>
   requests.filter((request) => request.url.endsWith("/oauth/token"));
 
+const RELAY_URL = "https://relay.example.test";
 const expiredStoredToken = new TextEncoder().encode(
-  JSON.stringify({ accessToken: "expired", refreshToken: "refresh-token-1", expiresAtEpochMs: 0 }),
+  JSON.stringify({
+    accessToken: "expired",
+    refreshToken: "refresh-token-1",
+    expiresAtEpochMs: 0,
+    provider: `clerk@${RELAY_URL}`,
+  }),
 );
 
 const provideRefreshManager = (
@@ -252,14 +259,18 @@ it.effect.each([
 );
 
 const OIDC_ISSUER = "https://sso.example.test/realms/t3";
-const OIDC_ENV = { T3CODE_OIDC_ISSUER: OIDC_ISSUER, T3CODE_OIDC_CLIENT_ID: "t3-code" };
-// What an OIDC sign-in stored; `expiredStoredToken` has no provider, so Clerk issued it.
+const OIDC_ENV = {
+  T3CODE_OIDC_ISSUER: OIDC_ISSUER,
+  T3CODE_OIDC_CLIENT_ID: "t3-code",
+  T3CODE_RELAY_URL: RELAY_URL,
+};
+// What an OIDC sign-in through RELAY_URL stored; `expiredStoredToken` came from Clerk.
 const oidcStoredToken = new TextEncoder().encode(
   JSON.stringify({
     accessToken: "expired",
     refreshToken: "refresh-token-1",
     expiresAtEpochMs: 0,
-    provider: `oidc:${OIDC_ISSUER}|t3-code`,
+    provider: `oidc:${OIDC_ISSUER}|t3-code@${RELAY_URL}`,
   }),
 );
 
@@ -363,7 +374,14 @@ it.effect("refuses an OIDC token response that carries no ID token", () =>
   ),
 );
 
-it.effect("never refreshes a credential another provider issued", () => {
+it.effect.each([
+  ["another provider issued", expiredStoredToken, OIDC_ENV],
+  [
+    "obtained through another relay",
+    oidcStoredToken,
+    { ...OIDC_ENV, T3CODE_RELAY_URL: "https://relay.attacker.example" },
+  ],
+] as const)("never presents a credential %s", ([, stored, env]) => {
   const requests: Array<RecordedTokenRequest> = [];
   return Effect.gen(function* () {
     const manager = yield* CliTokenManager.CloudCliTokenManager;
@@ -371,7 +389,11 @@ it.effect("never refreshes a credential another provider issued", () => {
     assert.isFalse(yield* manager.hasCredential);
     assert.deepEqual(requests, []);
   }).pipe(
-    provideRefreshManager(oidcProvider({ requests, tokenResponse: {} }), undefined, OIDC_ENV),
+    provideRefreshManager(
+      oidcProvider({ requests, tokenResponse: {} }),
+      Layer.mock(ServerSecretStore.ServerSecretStore)({ get: () => Effect.succeedSome(stored) }),
+      env,
+    ),
   );
 });
 

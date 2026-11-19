@@ -47,6 +47,7 @@ import {
   cloudCliOAuthConfig,
   hostedAppUrlConfig,
   oidcSettingsConfig,
+  relayUrlConfig,
   type CloudCliOAuthConfig,
 } from "./publicConfig.ts";
 import { renderLoopbackAuthorizationCompleteHtml } from "./cliAuthHtml.ts";
@@ -62,6 +63,30 @@ const DEVICE_AUTHORIZATION_SLOW_DOWN_INCREMENT = Duration.seconds(5);
 // A stalled OAuth request holds the semaphore and blocks all credential calls.
 const OAUTH_REQUEST_TIMEOUT = Duration.seconds(10);
 const boldTerminalText = (value: string): string => `\u001b[1m${value}\u001b[22m`;
+
+const hostOf = (url: string): string => {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+};
+
+/**
+ * Names the relay and sign-in host before any code or link, so a relay or provider swapped in
+ * through the environment is visible before the user approves anything.
+ */
+const describeSignInTarget = Effect.fn("cloud.cli_token.describe_sign_in_target")(function* (
+  metadata: Pick<CloudCliOAuthConfig, "tokenEndpoint">,
+) {
+  const relayUrl = yield* Config.option(relayUrlConfig);
+  return [
+    `Signing in to T3 Connect through relay ${Option.getOrElse(relayUrl, () => "(none configured)")}`,
+    `with the sign-in provider at ${hostOf(metadata.tokenEndpoint)}.`,
+    "Continue only if you started this sign-in and recognize both addresses.",
+    "",
+  ].join("\n");
+});
 
 function formatLoopbackAuthorizationPrompt(authorizationUrl: string): string {
   return [
@@ -532,6 +557,7 @@ export const deviceAuthorizationLogin = Effect.fn("cloud.cli_token.device_author
       authorization.interval === undefined
         ? DEVICE_AUTHORIZATION_DEFAULT_INTERVAL
         : Duration.seconds(authorization.interval);
+    yield* Console.log(yield* describeSignInTarget(metadata));
     yield* showPrompt({
       verificationUri: authorization.verification_uri,
       verificationUriComplete: authorization.verification_uri_complete,
@@ -560,12 +586,18 @@ export const make = Effect.gen(function* () {
   const terminal = yield* Terminal.Terminal;
   const externalLauncher = yield* ExternalLauncher.ExternalLauncher;
   const semaphore = yield* Semaphore.make(1);
-  // A credential works only with the provider that issued it; unstamped ones came from Clerk.
-  const currentProvider = Config.map(
-    oidcSettingsConfig,
-    Option.match({
-      onNone: () => "clerk",
-      onSome: ({ issuer, clientId }) => `oidc:${issuer}|${clientId}`,
+  // A credential works only with the provider that issued it and the relay it was obtained for,
+  // so a changed T3CODE_RELAY_URL never receives it. Unstamped ones came from Clerk.
+  const currentProvider = Config.all({
+    oidc: oidcSettingsConfig,
+    relayUrl: Config.option(relayUrlConfig),
+  }).pipe(
+    Config.map(({ oidc, relayUrl }) => {
+      const provider = Option.match(oidc, {
+        onNone: () => "clerk",
+        onSome: ({ issuer, clientId }) => `oidc:${issuer}|${clientId}`,
+      });
+      return `${provider}@${Option.getOrElse(relayUrl, () => "")}`;
     }),
   );
   const persist = Effect.fn("cloud.cli_token.persist")(function* (token: PersistedToken) {
@@ -652,6 +684,7 @@ export const make = Effect.gen(function* () {
             nonce,
             challenge,
           });
+    yield* Console.log(yield* describeSignInTarget(metadata));
     yield* Console.log(formatLoopbackAuthorizationPrompt(authorizationUrl));
     const authorization = yield* waitForLoopbackAuthorization({
       authorizationUrl,

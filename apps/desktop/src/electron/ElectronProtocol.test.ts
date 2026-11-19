@@ -19,6 +19,8 @@ vi.mock("electron", () => ({
 import * as ElectronProtocol from "./ElectronProtocol.ts";
 
 const layerProtocol = ElectronProtocol.layer.pipe(Layer.provide(NodeServices.layer));
+const INDEX_HTML =
+  '<html><script>document.title="t3"</script><script type="module" src="/app.js"></script></html>';
 
 describe("ElectronProtocol", () => {
   beforeEach(() => {
@@ -31,7 +33,7 @@ describe("ElectronProtocol", () => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const directory = yield* fileSystem.makeTempDirectoryScoped();
-      yield* fileSystem.writeFileString(`${directory}/index.html`, "<html>app</html>");
+      yield* fileSystem.writeFileString(`${directory}/index.html`, INDEX_HTML);
       yield* fileSystem.writeFileString(`${directory}/app.js`, "export default 1;");
       let handler: ((request: Request) => Promise<Response>) | undefined;
       handleMock.mockImplementation((_scheme, nextHandler) => {
@@ -47,12 +49,17 @@ describe("ElectronProtocol", () => {
         Effect.promise(() => handler!(new Request(`t3code://app${pathname}`, init)));
 
       const page = yield* request("/settings/connections");
-      assert.equal(yield* Effect.promise(() => page.text()), "<html>app</html>");
+      assert.equal(yield* Effect.promise(() => page.text()), INDEX_HTML);
       assert.include(page.headers.get("content-security-policy") ?? "", "default-src 'self'");
+      // Only the page's own inline script may run, so injected markup cannot run any.
+      assert.include(
+        page.headers.get("content-security-policy") ?? "",
+        "script-src 'self' 'sha256-0mydAyr5z6sCDS/+lhO8lG4Zw15uCuTqhyucRj8eoi0=' 'wasm-unsafe-eval'",
+      );
       const dottedRoute = yield* request("/environment/thread.with.dots", {
         headers: { accept: "text/html" },
       });
-      assert.equal(yield* Effect.promise(() => dottedRoute.text()), "<html>app</html>");
+      assert.equal(yield* Effect.promise(() => dottedRoute.text()), INDEX_HTML);
 
       const script = yield* request("/app.js?v=1");
       assert.equal(yield* Effect.promise(() => script.text()), "export default 1;");

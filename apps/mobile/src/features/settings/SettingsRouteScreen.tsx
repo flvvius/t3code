@@ -22,7 +22,11 @@ import { deriveProjectGroupLabel } from "@t3tools/client-runtime/state/project-g
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { useCloudAuth } from "../cloud/cloudAuth";
-import { hasCloudPublicConfig, readSelfHostedRelay } from "../cloud/publicConfig";
+import {
+  hasCloudPublicConfig,
+  readSelfHostedRelay,
+  selfHostedRelayChoiceAvailable,
+} from "../cloud/publicConfig";
 import { useAdaptiveWorkspaceLayout } from "../layout/adaptive-workspace-context";
 import { useSavedRemoteConnections } from "../../state/use-remote-environment-registry";
 import { SettingsRow } from "./components/SettingsRow";
@@ -132,7 +136,7 @@ function ConfiguredSettingsRouteScreen() {
           onPress: () => navigation.navigate("SettingsAuth"),
         },
         environmentsRow(gt("Environments"), Object.keys(savedConnectionsById).length),
-        connectServiceRow(gt("T3 Connect service")),
+        ...connectServiceRows(gt("T3 Connect service")),
         {
           id: "SettingsNotifications",
           icon: "bell.badge",
@@ -151,22 +155,25 @@ function LocalSettingsRouteScreen() {
     <SettingsList
       connections={[
         environmentsRow(gt("Environments"), Object.keys(savedConnectionsById).length),
-        connectServiceRow(gt("T3 Connect service")),
+        ...connectServiceRows(gt("T3 Connect service")),
       ]}
     />
   );
 }
 
-function connectServiceRow(label: string): SettingsListRow {
+function connectServiceRows(label: string): SettingsListRow[] {
+  if (!selfHostedRelayChoiceAvailable()) return [];
   const relay = readSelfHostedRelay();
-  return {
-    id: "SettingsConnectService",
-    icon: "server.rack",
-    label,
-    value: relay ? new URL(relay.relayUrl).host : "T3 Connect",
-    valuePosition: "trailing",
-    target: "SettingsConnectService",
-  };
+  return [
+    {
+      id: "SettingsConnectService",
+      icon: "server.rack",
+      label,
+      value: relay ? new URL(relay.relayUrl).host : "T3 Connect",
+      valuePosition: "trailing",
+      target: "SettingsConnectService",
+    },
+  ];
 }
 
 function environmentsRow(label: string, count: number): SettingsListRow {

@@ -12,6 +12,8 @@ process.env.EXPO_NO_TYPESCRIPT_SETUP = "1";
 
 const APP_VARIANT = resolveAppVariant(repoEnv.APP_VARIANT);
 const isIosPersonalTeamBuild = repoEnv.T3CODE_IOS_PERSONAL_TEAM === "1";
+const isEnabled = (value: string | undefined) =>
+  ["1", "true"].includes(value?.trim().toLowerCase() ?? "");
 const runtimeVersionPolicy =
   process.env.MOBILE_VERSION_POLICY ??
   (APP_VARIANT === "development" ? "appVersion" : "fingerprint");
@@ -451,7 +453,16 @@ const config: ExpoConfig = {
     ["expo-sensors", { motionPermission: false }],
     // Mods run in reverse order; expo-widgets must create and wipe the target before assets are added.
     ...(!isIosPersonalTeamBuild ? ["./plugins/withWidgetLogoAsset.cjs", widgetsPlugin] : []),
-    "./plugins/withAndroidNetworkSecurityConfig.cjs",
+    [
+      "./plugins/withAndroidNetworkSecurityConfig.cjs",
+      {
+        // Development builds load from Metro over http and keep the permissive defaults.
+        allowCleartext:
+          APP_VARIANT === "development" || isEnabled(repoEnv.T3CODE_ANDROID_ALLOW_CLEARTEXT),
+        trustUserCertificates:
+          APP_VARIANT === "development" || isEnabled(repoEnv.T3CODE_ANDROID_TRUST_USER_CAS),
+      },
+    ],
     "./plugins/withAndroidGradleHeap.cjs",
     "./plugins/withAndroidInputBackground.cjs",
     "./plugins/withAndroidModernPopupMenu.cjs",
@@ -470,6 +481,8 @@ const config: ExpoConfig = {
     iosPersonalTeamBuild: isIosPersonalTeamBuild,
     relay: {
       url: repoEnv.T3CODE_RELAY_URL ?? null,
+      pinned: repoEnv.T3CODE_RELAY_PINNED ?? null,
+      allowlist: repoEnv.T3CODE_RELAY_ALLOWLIST ?? null,
     },
     clerk: {
       publishableKey: repoEnv.EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY ?? null,

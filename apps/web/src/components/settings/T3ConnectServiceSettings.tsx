@@ -6,7 +6,12 @@ import { msg, T, useGT, useMessages } from "gt-react";
 import { useState } from "react";
 
 import { useCloudAuth } from "~/cloud/cloudAuth";
-import { readSelfHostedRelay, saveSelfHostedRelay } from "~/cloud/publicConfig";
+import {
+  readSelfHostedRelay,
+  resolveRelayPolicy,
+  saveSelfHostedRelay,
+  selfHostedRelayChoiceAvailable,
+} from "~/cloud/publicConfig";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
@@ -36,6 +41,10 @@ const switchTo = (relay: SelfHostedRelay | null) => {
 
 /** Chooses between the build's T3 Connect and a relay the user runs themselves. */
 export function T3ConnectServiceSettings() {
+  return selfHostedRelayChoiceAvailable() ? <ServiceChoice /> : null;
+}
+
+function ServiceChoice() {
   const searchableSetting = useSearchableSetting();
   const gt = useGT();
   const m = useMessages();
@@ -50,7 +59,7 @@ export function T3ConnectServiceSettings() {
     setError(null);
     setIsChecking(true);
     try {
-      switchTo(await discoverSelfHostedRelay(address));
+      switchTo(await discoverSelfHostedRelay(address, { policy: resolveRelayPolicy() }));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : gt("Could not reach the relay."));
       setIsChecking(false);
