@@ -3,9 +3,12 @@ import {
   relayClerkTokenOptions,
 } from "@t3tools/shared/relayAuth";
 import {
+  canChooseSelfHostedRelay,
   encodeSelfHostedRelay,
+  parseRelayPolicy,
   parseStoredSelfHostedRelay,
   SELF_HOSTED_RELAY_STORAGE_KEY,
+  type RelayPolicy,
   type SelfHostedRelay,
 } from "@t3tools/client-runtime/relay/self-hosted";
 import { normalizeSecureRelayUrl } from "@t3tools/shared/relayUrl";
@@ -50,6 +53,17 @@ function normalizeSecureUrl(value: string): string | null {
   }
 }
 
+/** Which relays this build lets the user switch to (`T3CODE_RELAY_PINNED`, `T3CODE_RELAY_ALLOWLIST`). */
+export function resolveRelayPolicy(): RelayPolicy {
+  return parseRelayPolicy({
+    pinned: import.meta.env.VITE_T3CODE_RELAY_PINNED as string | undefined,
+    allowlist: import.meta.env.VITE_T3CODE_RELAY_ALLOWLIST as string | undefined,
+  });
+}
+
+export const selfHostedRelayChoiceAvailable = (): boolean =>
+  canChooseSelfHostedRelay(resolveRelayPolicy());
+
 let selfHostedRelay: SelfHostedRelay | null | undefined;
 
 /** The relay the user chose in settings; it replaces the build's T3 Connect until cleared. */
@@ -58,6 +72,7 @@ export function readSelfHostedRelay(): SelfHostedRelay | null {
   try {
     selfHostedRelay = parseStoredSelfHostedRelay(
       window.localStorage.getItem(SELF_HOSTED_RELAY_STORAGE_KEY),
+      resolveRelayPolicy(),
     );
   } catch {
     selfHostedRelay = null;
@@ -139,13 +154,14 @@ export function resolveRelayTracingConfig() {
 export interface OidcPublicConfig {
   readonly issuer: string;
   readonly clientId: string;
+  readonly relayUrl: string;
 }
 
 /** An OpenID Connect provider takes the place of Clerk when the build configures one. */
 export function resolveOidcPublicConfig(): OidcPublicConfig | null {
   const { oidcIssuer, oidcClientId, relayUrl } = resolveCloudPublicConfig();
   return oidcIssuer && oidcClientId && relayUrl
-    ? { issuer: oidcIssuer, clientId: oidcClientId }
+    ? { issuer: oidcIssuer, clientId: oidcClientId, relayUrl }
     : null;
 }
 
