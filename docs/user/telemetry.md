@@ -58,7 +58,10 @@ product events and relay diagnostics. The telemetry opt-out does not disable it.
 
 To stop publishing, turn off **Publish agent activity** under **Settings > Sharing & access** on
 the host. Turning off notifications on a phone controls that phone's alerts, not the host's
-publishing setting.
+publishing setting. To keep a host from ever publishing, whatever that setting says, start it with
+`T3CODE_AGENT_ACTIVITY_PUBLISHING=false`. To keep publishing but hide titles, start it with
+`T3CODE_AGENT_ACTIVITY_REDACT_TITLES=true`; notifications then read "Private project" and
+"Private task" instead of the real names.
 
 ## Export diagnostics to your own receiver
 

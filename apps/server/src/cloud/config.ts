@@ -37,6 +37,22 @@ export const readRelayRemoteControlAllowed = Effect.gen(function* () {
   return Option.isNone(yield* secrets.get(RELAY_REMOTE_CONTROL_OFF_SECRET));
 });
 
+/** `T3CODE_AGENT_ACTIVITY_PUBLISHING=false` stops this host publishing agent activity at all. */
+export const readAgentActivityPublishingAllowed = Config.Boolean(
+  "T3CODE_AGENT_ACTIVITY_PUBLISHING",
+).pipe(
+  Config.withDefault(true),
+  Effect.orElseSucceed(() => false),
+);
+
+/** `T3CODE_AGENT_ACTIVITY_REDACT_TITLES=true` publishes generic project and thread titles. */
+export const readAgentActivityTitlesRedacted = Config.Boolean(
+  "T3CODE_AGENT_ACTIVITY_REDACT_TITLES",
+).pipe(
+  Config.withDefault(false),
+  Effect.orElseSucceed(() => true),
+);
+
 export const encodeEndpointRuntimeConfigJson = Schema.encodeEffect(
   Schema.fromJsonString(RelayManagedEndpointRuntimeConfig),
 );
@@ -70,6 +86,7 @@ export const readAgentActivityPublishingActive: (
   secrets: ServerSecretStore.ServerSecretStore["Service"],
 ) => Effect.Effect<boolean> = Effect.fn("config.readAgentActivityPublishingActive")(
   function* (secrets: ServerSecretStore.ServerSecretStore["Service"]) {
+    if (!(yield* readAgentActivityPublishingAllowed)) return false;
     const readSecretString = (name: string) =>
       secrets
         .get(name)
