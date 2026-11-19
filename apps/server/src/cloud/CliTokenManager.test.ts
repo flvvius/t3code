@@ -22,6 +22,7 @@ const TEST_ENV = {
   T3CODE_CLERK_PUBLISHABLE_KEY: "pk_test_Y2xlcmsuZXhhbXBsZS50ZXN0JA==",
   T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: "oauth_client_test",
   T3CODE_HOSTED_APP_URL: "https://hosted.example.test",
+  T3CODE_RELAY_URL: "https://relay.example.test",
 };
 
 interface RecordedTokenRequest {
@@ -107,8 +108,14 @@ const layerDeviceFlow = (server: DeviceFlowServer) =>
 const tokenRequests = (requests: ReadonlyArray<RecordedTokenRequest>) =>
   requests.filter((request) => request.url.endsWith("/oauth/token"));
 
+const RELAY_URL = "https://relay.example.test";
 const expiredStoredToken = new TextEncoder().encode(
-  JSON.stringify({ accessToken: "expired", refreshToken: "refresh-token-1", expiresAtEpochMs: 0 }),
+  JSON.stringify({
+    accessToken: "expired",
+    refreshToken: "refresh-token-1",
+    expiresAtEpochMs: 0,
+    provider: `clerk@${RELAY_URL}`,
+  }),
 );
 
 const provideRefreshManager = (
@@ -116,6 +123,7 @@ const provideRefreshManager = (
   secrets = Layer.mock(ServerSecretStore.ServerSecretStore)({
     get: () => Effect.succeedSome(expiredStoredToken),
   }),
+  env: Readonly<Record<string, string>> = TEST_ENV,
 ) =>
   Effect.provide(
     CliTokenManager.layer.pipe(
@@ -128,7 +136,7 @@ const provideRefreshManager = (
           NodeCrypto.layer,
         ),
       ),
-      Layer.provideMerge(ConfigProvider.layer(ConfigProvider.fromEnv({ env: TEST_ENV }))),
+      Layer.provideMerge(ConfigProvider.layer(ConfigProvider.fromEnv({ env }))),
     ),
   );
 
@@ -250,6 +258,162 @@ it.effect.each([
     ),
 );
 
+const OIDC_ISSUER = "https://sso.example.test/realms/t3";
+const OIDC_ENV = {
+  T3CODE_OIDC_ISSUER: OIDC_ISSUER,
+  T3CODE_OIDC_CLIENT_ID: "t3-code",
+  T3CODE_RELAY_URL: RELAY_URL,
+};
+// What an OIDC sign-in through RELAY_URL stored; `expiredStoredToken` came from Clerk.
+const oidcStoredToken = new TextEncoder().encode(
+  JSON.stringify({
+    accessToken: "expired",
+    refreshToken: "refresh-token-1",
+    expiresAtEpochMs: 0,
+    provider: `oidc:${OIDC_ISSUER}|t3-code@${RELAY_URL}`,
+  }),
+);
+
+const OidcClaimsJson = Schema.fromJsonString(
+  Schema.Struct({
+    sub: Schema.String,
+    iss: Schema.String,
+    exp: Schema.Number,
+    email: Schema.String,
+  }),
+);
+const encodeOidcClaims = Schema.encodeSync(OidcClaimsJson);
+const oidcIdToken = (exp: number) =>
+  `${Base64Url.encode(encodeTestIdTokenHeader({ alg: "none" }))}.${Base64Url.encode(
+    encodeOidcClaims({ sub: "alice", iss: OIDC_ISSUER, exp, email: "theo@example.test" }),
+  )}.`;
+
+const oidcProvider = (input: {
+  readonly deviceAuthorizationEndpoint?: string;
+  readonly tokenResponse: Readonly<Record<string, unknown>>;
+  readonly requests: Array<RecordedTokenRequest>;
+}) =>
+  HttpClient.make((request) =>
+    Effect.sync(() => {
+      const body =
+        request.body._tag === "Uint8Array" ? new TextDecoder().decode(request.body.body) : "";
+      input.requests.push({ url: request.url, params: new URLSearchParams(body) });
+      return HttpClientResponse.fromWeb(
+        request,
+        request.url.endsWith("/.well-known/openid-configuration")
+          ? Response.json({
+              issuer: OIDC_ISSUER,
+              authorization_endpoint: `${OIDC_ISSUER}/auth`,
+              token_endpoint: `${OIDC_ISSUER}/token`,
+              ...(input.deviceAuthorizationEndpoint === undefined
+                ? {}
+                : { device_authorization_endpoint: input.deviceAuthorizationEndpoint }),
+            })
+          : Response.json(input.tokenResponse),
+      );
+    }),
+  );
+
+it.effect("refreshes against the discovered OIDC token endpoint and keeps the ID token", () => {
+  const requests: Array<RecordedTokenRequest> = [];
+  const idToken = oidcIdToken(4_000_000_000);
+  let stored = oidcStoredToken;
+  const secrets = Layer.mock(ServerSecretStore.ServerSecretStore)({
+    get: () => Effect.sync(() => Option.some(stored)),
+    set: (_name, value) =>
+      Effect.sync(() => {
+        stored = new Uint8Array(value);
+      }),
+  });
+  return Effect.gen(function* () {
+    const manager = yield* CliTokenManager.CloudCliTokenManager;
+    const token = Option.getOrThrow(yield* manager.getExisting);
+
+    // The relay verifies the ID token, so it is the credential, and the provider's lack of
+    // refresh token rotation keeps the stored one.
+    assert.equal(token.accessToken, idToken);
+    assert.equal(token.refreshToken, "refresh-token-1");
+    assert.equal(token.expiresAtEpochMs, 4_000_000_000_000);
+    assert.equal(token.identity, "theo@example.test");
+    const refresh = requests.find((request) => request.url === `${OIDC_ISSUER}/token`);
+    assert.equal(refresh?.params.get("grant_type"), "refresh_token");
+    assert.equal(refresh?.params.get("client_id"), "t3-code");
+  }).pipe(
+    provideRefreshManager(
+      oidcProvider({
+        requests,
+        tokenResponse: {
+          access_token: "opaque-access-token",
+          id_token: idToken,
+          expires_in: 300,
+          token_type: "bearer",
+        },
+      }),
+      secrets,
+      OIDC_ENV,
+    ),
+  );
+});
+
+it.effect("refuses an OIDC token response that carries no ID token", () =>
+  Effect.gen(function* () {
+    const manager = yield* CliTokenManager.CloudCliTokenManager;
+    const error = yield* manager.getExisting.pipe(Effect.flip);
+    assert.instanceOf(error, CliTokenManager.CloudCliCredentialRefreshError);
+  }).pipe(
+    provideRefreshManager(
+      oidcProvider({
+        requests: [],
+        tokenResponse: { access_token: "opaque", expires_in: 300, token_type: "bearer" },
+      }),
+      Layer.mock(ServerSecretStore.ServerSecretStore)({
+        get: () => Effect.succeedSome(oidcStoredToken),
+      }),
+      OIDC_ENV,
+    ),
+  ),
+);
+
+it.effect.each([
+  ["another provider issued", expiredStoredToken, OIDC_ENV],
+  [
+    "obtained through another relay",
+    oidcStoredToken,
+    { ...OIDC_ENV, T3CODE_RELAY_URL: "https://relay.attacker.example" },
+  ],
+] as const)("never presents a credential %s", ([, stored, env]) => {
+  const requests: Array<RecordedTokenRequest> = [];
+  return Effect.gen(function* () {
+    const manager = yield* CliTokenManager.CloudCliTokenManager;
+    assert.isTrue(Option.isNone(yield* manager.getExisting));
+    assert.isFalse(yield* manager.hasCredential);
+    assert.deepEqual(requests, []);
+  }).pipe(
+    provideRefreshManager(
+      oidcProvider({ requests, tokenResponse: {} }),
+      Layer.mock(ServerSecretStore.ServerSecretStore)({ get: () => Effect.succeedSome(stored) }),
+      env,
+    ),
+  );
+});
+
+it.effect("reports a provider without device authorization instead of calling Clerk", () => {
+  const requests: Array<RecordedTokenRequest> = [];
+  return CliTokenManager.deviceAuthorizationLogin(() => Effect.void).pipe(
+    Effect.flip,
+    Effect.map((error) =>
+      assert.include(String(error.cause), "does not support device authorization"),
+    ),
+    Effect.provide(
+      Layer.mergeAll(
+        Layer.succeed(HttpClient.HttpClient, oidcProvider({ requests, tokenResponse: {} })),
+        ConfigProvider.layer(ConfigProvider.fromEnv({ env: OIDC_ENV })),
+        NodeCrypto.layer,
+      ),
+    ),
+  );
+});
+
 it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))(
   "CliTokenManager.deviceAuthorizationLogin",
   (it) => {
@@ -287,10 +451,17 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))(
         assert.equal(authorization.url, "https://clerk.example.test/oauth/device_authorization");
         assert.equal(authorization.params.get("client_id"), "oauth_client_test");
         assert.equal(authorization.params.get("scope"), "openid profile email offline_access");
+        assert.equal(authorization.params.get("code_challenge_method"), "S256");
+        const challenge = authorization.params.get("code_challenge");
 
         const polls = tokenRequests(server.requests);
         assert.lengthOf(polls, 2);
         for (const poll of polls) {
+          const verifier = poll.params.get("code_verifier") ?? "";
+          const digest = yield* Effect.promise(() =>
+            crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)),
+          );
+          assert.equal(Base64Url.encode(new Uint8Array(digest)), challenge);
           assert.equal(poll.url, "https://clerk.example.test/oauth/token");
           assert.equal(
             poll.params.get("grant_type"),

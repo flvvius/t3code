@@ -44,6 +44,8 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import {
   isAgentActivityPublishingEnabledValue,
   PUBLISH_AGENT_ACTIVITY_SECRET,
+  readAgentActivityPublishingAllowed,
+  readAgentActivityTitlesRedacted,
   RELAY_ENVIRONMENT_CREDENTIAL_SECRET,
   RELAY_ISSUER_SECRET,
   RELAY_URL_SECRET,
@@ -218,6 +220,14 @@ function sanitizeRelayAgentActivityState(
     .slice(0, RELAY_AGENT_ACTIVITY_DETAIL_MAX_LENGTH)
     .trim();
   return detail ? { ...rest, detail } : rest;
+}
+
+function redactRelayAgentActivityTitles(
+  state: RelayAgentActivityState | null,
+): RelayAgentActivityState | null {
+  return state === null
+    ? null
+    : { ...state, projectTitle: "Private project", threadTitle: "Private task" };
 }
 
 function relayEnvironmentClient(token: string) {
@@ -457,8 +467,10 @@ export const make = Effect.gen(function* () {
       : null;
   });
 
+  const publishingAllowed = yield* readAgentActivityPublishingAllowed;
+  const redactTitles = yield* readAgentActivityTitlesRedacted;
   const readPublishAgentActivityEnabled = readSecretString(PUBLISH_AGENT_ACTIVITY_SECRET).pipe(
-    Effect.map(isAgentActivityPublishingEnabledValue),
+    Effect.map((value) => publishingAllowed && isAgentActivityPublishingEnabledValue(value)),
   );
 
   const makeRelayClient = (relayConfig: {
@@ -538,11 +550,12 @@ export const make = Effect.gen(function* () {
         cachedRelayClient = yield* makeRelayClient(relayConfig);
       }
       const relayClient = cachedRelayClient;
+      const state = redactTitles ? redactRelayAgentActivityTitles(input.state) : input.state;
       const proof = yield* makePublishProof({
         relayIssuer: relayConfig.issuer,
         environmentId,
         threadId,
-        state: input.state,
+        state,
         jti: yield* random.uuidV4(),
       }).pipe(Effect.provideService(EnvironmentSigningKey, signingKey));
 
@@ -562,7 +575,7 @@ export const make = Effect.gen(function* () {
             threadId,
           },
           payload: {
-            state: input.state,
+            state,
             proof,
           },
         })
@@ -962,9 +975,8 @@ export const make = Effect.gen(function* () {
           yield* Effect.logInfo("agent activity publishing disabled by T3 Connect configuration");
           break;
         case "enabled":
-          yield* Effect.logInfo("agent activity publishing enabled", {
-            relayUrl: relayConfig?.url,
-          });
+          // No relayUrl: a relay address change only applies once the link reconciles, after this line.
+          yield* Effect.logInfo("agent activity publishing enabled");
           break;
       }
       yield* forkParked(

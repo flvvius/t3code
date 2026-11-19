@@ -115,6 +115,12 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     const enabled = ipcRenderer.sendSync(IpcChannels.GET_RELAY_TELEMETRY_ENABLED_CHANNEL);
     return enabled === null ? null : enabled === true;
   },
+  getOidcSession: () => {
+    const session: unknown = ipcRenderer.sendSync(IpcChannels.GET_OIDC_SESSION_CHANNEL);
+    return typeof session === "string" ? session : null;
+  },
+  setOidcSession: (session) => ipcRenderer.invoke(IpcChannels.SET_OIDC_SESSION_CHANNEL, session),
+  requestOidcToken: (input) => ipcRenderer.invoke(IpcChannels.REQUEST_OIDC_TOKEN_CHANNEL, input),
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
   getClientPlatform: () => clientPlatform,
   restartAudioService: () => ipcRenderer.invoke(IpcChannels.RESTART_AUDIO_SERVICE_CHANNEL),

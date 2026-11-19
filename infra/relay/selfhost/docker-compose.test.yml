@@ -1,0 +1,5 @@
+# Local test override (not part of the PR): expose the relay on localhost for a quick tunnel, no Caddy.
+services:
+  relay:
+    ports:
+      - "127.0.0.1:8080:8080"

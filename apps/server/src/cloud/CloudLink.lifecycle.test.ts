@@ -43,6 +43,7 @@ import {
   decodeRuntimeConfig,
   RELAY_ENVIRONMENT_CREDENTIAL_SECRET,
   RELAY_ISSUER_SECRET,
+  RELAY_REMOTE_CONTROL_OFF_SECRET,
   RELAY_URL_SECRET,
 } from "./config.ts";
 import * as CloudLink from "./CloudLink.ts";
@@ -150,6 +151,7 @@ describe("releaseManagedTunnelOnShutdown", () => {
     readonly getExisting?: CliTokenManager.CloudCliTokenManager["Service"]["getExisting"];
     readonly latestReachability?: ConnectReachability.ConnectReachability["Service"]["latest"];
     readonly connector?: ManagedEndpointRuntime.ConnectorFacts;
+    readonly connectEnrollmentRevocations?: Array<true>;
   }
 
   const writeLauncherState = (update: ServiceUpdateRecord) =>
@@ -224,13 +226,22 @@ describe("releaseManagedTunnelOnShutdown", () => {
             restartConnector: () => Effect.succeed(false),
             tunnelConnected: Stream.empty,
             inspectConnector: Effect.succeed(harness.connector ?? null),
+            inspectRelayChannel: Effect.succeed(null),
             readinessChanged: Stream.empty,
             withLinkStateLock: (effect) => effect,
           }),
         ),
         Effect.provideService(
           EnvironmentAuth.EnvironmentAuth,
-          EnvironmentAuth.EnvironmentAuth.of({} as EnvironmentAuth.EnvironmentAuth["Service"]),
+          EnvironmentAuth.EnvironmentAuth.of({
+            revokeConnectEnrollments: () =>
+              Effect.sync(() => {
+                harness.connectEnrollmentRevocations?.push(true);
+                return 0;
+              }),
+          } as Partial<
+            EnvironmentAuth.EnvironmentAuth["Service"]
+          > as EnvironmentAuth.EnvironmentAuth["Service"]),
         ),
         Effect.provideService(
           CliTokenManager.CloudCliTokenManager,
@@ -354,6 +365,73 @@ describe("releaseManagedTunnelOnShutdown", () => {
       expect(requests).toEqual([]);
       expect(applyConfigCalls).toEqual([]);
     }).pipe(provideReleaseHarness({ store, applyConfigCalls, requests }));
+  });
+
+  it.effect("keeps a relay channel's config at shutdown", () => {
+    const { store, values } = makeMemorySecretStore([
+      ...managedLinkSecrets.filter(([name]) => name !== CLOUD_ENDPOINT_RUNTIME_CONFIG),
+      [
+        CLOUD_ENDPOINT_RUNTIME_CONFIG,
+        JSON.stringify({
+          providerKind: "t3_relay",
+          connectorToken: "credential",
+          channelUrl: "wss://relay.example.test/v1/environments/env_123/channel",
+        }),
+      ],
+    ]);
+    const applyConfigCalls: Array<unknown> = [];
+    const requests: Array<HttpClientRequest.HttpClientRequest> = [];
+
+    return Effect.gen(function* () {
+      const link = yield* CloudLink.CloudLink;
+
+      expect(yield* link.releaseManagedTunnelOnShutdown()).toBe(false);
+      expect(requests).toEqual([]);
+      expect(applyConfigCalls).toEqual([]);
+      expect(values.has(CLOUD_ENDPOINT_RUNTIME_CONFIG)).toBe(true);
+    }).pipe(provideReleaseHarness({ store, applyConfigCalls, requests }));
+  });
+
+  const relayChannelConfig = {
+    providerKind: "t3_relay" as const,
+    connectorToken: "credential",
+    channelUrl: "wss://relay.example.test/v1/environments/env_123/channel",
+  };
+
+  it.effect("an activity-only link refuses a relay channel the relay hands it", () => {
+    const { store, values } = makeMemorySecretStore([[RELAY_REMOTE_CONTROL_OFF_SECRET, "true"]]);
+    const applyConfigCalls: Array<unknown> = [];
+
+    return Effect.gen(function* () {
+      const link = yield* CloudLink.CloudLink;
+      expect(
+        yield* link.applyRelayConfig({
+          relayUrl: "https://relay.example.test",
+          cloudUserId: "user-123",
+          environmentCredential: "environment-credential",
+          cloudMintPublicKey:
+            "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAqZ2u2LjMoAyG2QTHXmITJ9w6RzZtVUAv394XCcPV0zE=\n-----END PUBLIC KEY-----",
+          endpointRuntime: relayChannelConfig,
+        }),
+      ).toMatchObject({ ok: true, endpointRuntimeStatus: { status: "disabled" } });
+      expect(applyConfigCalls.filter((config) => config !== null)).toEqual([]);
+      expect(values.has(CLOUD_ENDPOINT_RUNTIME_CONFIG)).toBe(false);
+      expect(values.has(CLOUD_LINKED_USER_ID)).toBe(true);
+    }).pipe(provideReleaseHarness({ store, applyConfigCalls, requests: [] }));
+  });
+
+  it.effect("an activity-only link does not start a relay channel stored before", () => {
+    const { store } = makeMemorySecretStore([
+      [CLOUD_ENDPOINT_RUNTIME_CONFIG, JSON.stringify(relayChannelConfig)],
+      [RELAY_REMOTE_CONTROL_OFF_SECRET, "true"],
+    ]);
+    const applyConfigCalls: Array<unknown> = [];
+
+    return Effect.gen(function* () {
+      const link = yield* CloudLink.CloudLink;
+      expect(yield* link.startManagedTunnelIfOriginConfirmed("http://127.0.0.1:3773")).toBe(false);
+      expect(applyConfigCalls).toEqual([]);
+    }).pipe(provideReleaseHarness({ store, applyConfigCalls, requests: [] }));
   });
 
   it.effect("stops the connector, releases the relay tunnel, and drops the dead token", () => {
@@ -748,6 +826,7 @@ describe("releaseManagedTunnelOnShutdown", () => {
       ...(revoked ? [[CLOUD_LINK_REVOKED, "true"] as const] : []),
       [CLOUD_CLI_DESIRED_LINK_SECRET, startup ? "publish_only" : "managed"],
     ]);
+    const connectEnrollmentRevocations: Array<true> = [];
     const cloudMintPublicKey =
       "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAqZ2u2LjMoAyG2QTHXmITJ9w6RzZtVUAv394XCcPV0zE=\n-----END PUBLIC KEY-----";
 
@@ -787,7 +866,10 @@ describe("releaseManagedTunnelOnShutdown", () => {
           "fresh-credential",
         );
         expect(values.has(CLOUD_CLI_DESIRED_LINK_SECRET)).toBe(cloudUserId === "user-123");
+        // Devices enrolled through the revoked link do not carry over to the new one.
+        expect(connectEnrollmentRevocations).toEqual([true]);
       } else {
+        expect(connectEnrollmentRevocations).toEqual([]);
         expect(Option.getOrThrow(result)).toBeInstanceOf(CloudLink.CloudLinkAccountMismatchError);
         expect(yield* link.linkState()).toMatchObject({
           cloudUserId: "user-123",
@@ -800,6 +882,7 @@ describe("releaseManagedTunnelOnShutdown", () => {
         store,
         applyConfigCalls: [],
         requests: [],
+        connectEnrollmentRevocations,
         respond: () =>
           Response.json({
             challenge: "challenge-1",

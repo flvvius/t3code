@@ -4129,6 +4129,30 @@ describe("UsageService", () => {
       }),
   );
 
+  it.effect("never fetches the price table when the host turns fetching off", () =>
+    Effect.gen(function* () {
+      const { transcript, settings, home } = yield* setup;
+      yield* Effect.promise(() => NodeFSP.writeFile(transcript, claudeLine(1, 5)));
+      const requests: HttpClientRequest.HttpClientRequest[] = [];
+      const service = yield* UsageService.make.pipe(
+        Effect.provide(
+          layerService({
+            prefix: "usage-service-rates-offline-test",
+            home,
+            settings,
+            environment: { T3CODE_USAGE_PRICE_FETCH: "false" },
+            onRatesFetch: (request) => requests.push(request),
+          }),
+        ),
+      );
+
+      const summary = yield* service.readSummary(WINDOW);
+      yield* service.refreshRates;
+      assert.strictEqual(summary.pricing.status, "unavailable");
+      assert.deepStrictEqual(requests, []);
+    }),
+  );
+
   it.effect("refetches cached rates early for a model they do not list", () =>
     Effect.gen(function* () {
       yield* TestClock.setTime(Date.parse("2026-08-02T00:00:00Z"));

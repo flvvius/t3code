@@ -26,12 +26,15 @@ export function cloudChangeReplacesLink(
   linkState: EnvironmentCloudLinkStateResult,
   relayProviderKind: RelayManagedEndpointProviderKind | undefined,
   desired: { readonly managedTunnel: boolean; readonly publish: boolean },
+  // Relays without managed tunnels only make publish-only links, so the tunnel never differs.
+  managedTunnels = true,
 ) {
+  const currentTunnel = managedTunnels && isManagedTunnelActive(linkState, relayProviderKind);
   return (
     (desired.managedTunnel || desired.publish) &&
     (!linkState.linked ||
       linkState.linkRevoked === true ||
-      isManagedTunnelActive(linkState, relayProviderKind) !== desired.managedTunnel)
+      currentTunnel !== (desired.managedTunnel && managedTunnels))
   );
 }
 

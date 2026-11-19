@@ -5,6 +5,8 @@ import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 
+import type { SubjectTokenVerificationFailed, VerifiedSubject } from "./auth/SubjectTokens.ts";
+
 export const ApnsEnvironment = Schema.Literals(["sandbox", "production"]);
 export type ApnsEnvironment = typeof ApnsEnvironment.Type;
 
@@ -40,6 +42,23 @@ export const legacyTunnelGraceMinutesConfig = Config.option(
   ),
 );
 
+const decodePositiveInt = Schema.decodeUnknownEffect(
+  Schema.NumberFromString.pipe(Schema.check(Schema.isInt(), Schema.isGreaterThan(0))),
+);
+
+/** A positive integer setting; unset or empty (as Compose passes unset variables) means `fallback`. */
+export const positiveIntConfig = (name: string, fallback: number) =>
+  Config.String(name).pipe(
+    Config.withDefault(""),
+    Config.mapEffect((value) =>
+      value.trim() === ""
+        ? Effect.succeed(fallback)
+        : decodePositiveInt(value.trim()).pipe(
+            Effect.mapError((error) => new Config.ConfigError(error)),
+          ),
+    ),
+  );
+
 export interface ApnsCredentials {
   readonly teamId: string;
   readonly keyId: string;
@@ -54,19 +73,41 @@ export interface T3ChatSettings {
   readonly linkSecret: Redacted.Redacted<string>;
 }
 
+// Whether the relay brokers connections to endpoints an environment declares itself, with no tunnel.
+// "public" accepts internet-reachable HTTPS addresses; "private" also accepts private networks.
+export const ManualEndpointsMode = Schema.Literals(["off", "public", "private"]);
+export type ManualEndpointsMode = typeof ManualEndpointsMode.Type;
+
+export interface OidcSettings {
+  // Must equal the issuer's discovery `issuer` exactly, so a path prefix or trailing slash matters.
+  readonly issuer: string;
+  /** The apps' OAuth client id, which is also the ID token audience the relay accepts. */
+  readonly clientId: string;
+  readonly verify: (
+    token: string,
+  ) => Effect.Effect<VerifiedSubject, SubjectTokenVerificationFailed>;
+}
+
 export class RelayConfiguration extends Context.Service<
   RelayConfiguration,
   {
     readonly relayIssuer: string;
     readonly apns: ApnsCredentials | null;
     readonly fcmServiceAccount?: Redacted.Redacted<string>;
-    readonly clerkSecretKey: Redacted.Redacted<string>;
-    readonly clerkPublishableKey: string;
-    readonly clerkJwtAudience: string;
+    // Optional: a self-hosted relay can run on OIDC alone.
+    readonly clerkSecretKey?: Redacted.Redacted<string>;
+    readonly clerkPublishableKey?: string;
+    readonly clerkJwtAudience?: string;
+    readonly oidc?: OidcSettings;
+    readonly manualEndpoints?: ManualEndpointsMode;
     readonly apnsDeliveryJobSigningSecret: Redacted.Redacted<string>;
     readonly cloudMintPrivateKey: Redacted.Redacted<string>;
     readonly cloudMintPublicKey: string;
     readonly managedEndpointBaseDomain: string | undefined;
+    /** Carries publish-only environments over relay channels; self-hosted Node relays only. */
+    readonly channels?: boolean;
+    /** Active environment links one account may hold; unset means no cap. */
+    readonly maxEnvironmentsPerUser?: number;
     readonly managedEndpointNamespace: string | undefined;
     readonly managedEndpointCleanupMode?: ManagedEndpointCleanupMode;
     readonly legacyManagedEndpointCleanupMode?: ManagedEndpointCleanupMode;

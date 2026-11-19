@@ -17,11 +17,22 @@ export const AuthConnectDeviceRecord = Schema.Struct({
 });
 export type AuthConnectDeviceRecord = typeof AuthConnectDeviceRecord.Type;
 
+/** Trust approved before this lapsed; null keeps it forever. */
+const TrustedSince = Schema.NullOr(Schema.DateTimeUtcFromString);
+
 const TrustInput = Schema.Struct({
   proofKeyThumbprint: Schema.String,
   client: Schema.NullOr(Schema.fromJsonString(AuthClientMetadata)),
   approvedAt: Schema.DateTimeUtcFromString,
+  trustedSince: TrustedSince,
 });
+
+const IsTrustedInput = Schema.Struct({
+  proofKeyThumbprint: Schema.String,
+  trustedSince: TrustedSince,
+});
+
+const ListInput = Schema.Struct({ trustedSince: TrustedSince });
 
 const ThumbprintInput = Schema.Struct({ proofKeyThumbprint: Schema.String });
 
@@ -33,17 +44,23 @@ const RemoveAllExceptInput = Schema.Struct({
 export class AuthConnectDeviceRepository extends Context.Service<
   AuthConnectDeviceRepository,
   {
-    /** Adds the key, or refreshes how an already trusted key describes itself. */
+    /**
+     * Adds the key, or refreshes how an already trusted key describes itself. A key whose trust
+     * lapsed before `trustedSince` is trusted again from `approvedAt`.
+     */
     readonly trust: (
       input: typeof TrustInput.Type,
     ) => Effect.Effect<void, AuthPairingLinkRepositoryError>;
     readonly isTrusted: (
-      proofKeyThumbprint: string,
+      input: typeof IsTrustedInput.Type,
     ) => Effect.Effect<boolean, AuthPairingLinkRepositoryError>;
-    readonly list: () => Effect.Effect<
-      ReadonlyArray<AuthConnectDeviceRecord>,
-      AuthPairingLinkRepositoryError
-    >;
+    readonly list: (
+      input: typeof ListInput.Type,
+    ) => Effect.Effect<ReadonlyArray<AuthConnectDeviceRecord>, AuthPairingLinkRepositoryError>;
+    /** Forgets keys approved before `trustedSince`, so their waiting requests need approval. */
+    readonly removeLapsed: (
+      input: typeof ListInput.Type,
+    ) => Effect.Effect<number, AuthPairingLinkRepositoryError>;
     readonly remove: (
       proofKeyThumbprint: string,
     ) => Effect.Effect<boolean, AuthPairingLinkRepositoryError>;
@@ -62,37 +79,55 @@ export const make = Effect.gen(function* () {
 
   const trustRow = SqlSchema.void({
     Request: TrustInput,
-    execute: ({ proofKeyThumbprint, client, approvedAt }) =>
+    // ISO timestamps from one encoder, so text comparison orders them.
+    execute: ({ proofKeyThumbprint, client, approvedAt, trustedSince }) =>
       sql`
         INSERT INTO auth_connect_devices (proof_key_thumbprint, client_json, approved_at)
         VALUES (${proofKeyThumbprint}, ${client}, ${approvedAt})
         ON CONFLICT (proof_key_thumbprint) DO UPDATE
-          SET client_json = COALESCE(excluded.client_json, auth_connect_devices.client_json)
+          SET client_json = COALESCE(excluded.client_json, auth_connect_devices.client_json),
+            approved_at = CASE
+              WHEN auth_connect_devices.approved_at < ${trustedSince} THEN excluded.approved_at
+              ELSE auth_connect_devices.approved_at
+            END
       `,
   });
 
   const isTrustedRow = SqlSchema.findAll({
-    Request: ThumbprintInput,
+    Request: IsTrustedInput,
     Result: Schema.Struct({ proofKeyThumbprint: Schema.String }),
-    execute: ({ proofKeyThumbprint }) =>
+    execute: ({ proofKeyThumbprint, trustedSince }) =>
       sql`
         SELECT proof_key_thumbprint AS "proofKeyThumbprint"
         FROM auth_connect_devices
         WHERE proof_key_thumbprint = ${proofKeyThumbprint}
+          AND (${trustedSince} IS NULL OR approved_at >= ${trustedSince})
       `,
   });
 
   const listRows = SqlSchema.findAll({
-    Request: Schema.Void,
+    Request: ListInput,
     Result: AuthConnectDeviceRecord,
-    execute: () =>
+    execute: ({ trustedSince }) =>
       sql`
         SELECT
           proof_key_thumbprint AS "proofKeyThumbprint",
           client_json AS "client",
           approved_at AS "approvedAt"
         FROM auth_connect_devices
+        WHERE ${trustedSince} IS NULL OR approved_at >= ${trustedSince}
         ORDER BY approved_at DESC, proof_key_thumbprint
+      `,
+  });
+
+  const removeLapsedRows = SqlSchema.findAll({
+    Request: ListInput,
+    Result: Schema.Struct({ proofKeyThumbprint: Schema.String }),
+    execute: ({ trustedSince }) =>
+      sql`
+        DELETE FROM auth_connect_devices
+        WHERE approved_at < ${trustedSince}
+        RETURNING proof_key_thumbprint AS "proofKeyThumbprint"
       `,
   });
 
@@ -121,17 +156,23 @@ export const make = Effect.gen(function* () {
   const trust: AuthConnectDeviceRepository["Service"]["trust"] = (input) =>
     trustRow(input).pipe(Effect.mapError(sqlError("AuthConnectDeviceRepository.trust")));
 
-  const isTrusted: AuthConnectDeviceRepository["Service"]["isTrusted"] = (proofKeyThumbprint) =>
-    isTrustedRow({ proofKeyThumbprint }).pipe(
+  const isTrusted: AuthConnectDeviceRepository["Service"]["isTrusted"] = (input) =>
+    isTrustedRow(input).pipe(
       NodeSqliteClient.readOnly,
       Effect.map((rows) => rows.length > 0),
       Effect.mapError(sqlError("AuthConnectDeviceRepository.isTrusted")),
     );
 
-  const list: AuthConnectDeviceRepository["Service"]["list"] = () =>
-    listRows(undefined).pipe(
+  const list: AuthConnectDeviceRepository["Service"]["list"] = (input) =>
+    listRows(input).pipe(
       NodeSqliteClient.readOnly,
       Effect.mapError(sqlError("AuthConnectDeviceRepository.list")),
+    );
+
+  const removeLapsed: AuthConnectDeviceRepository["Service"]["removeLapsed"] = (input) =>
+    (input.trustedSince === null ? Effect.succeed([]) : removeLapsedRows(input)).pipe(
+      Effect.map((rows) => rows.length),
+      Effect.mapError(sqlError("AuthConnectDeviceRepository.removeLapsed")),
     );
 
   const remove: AuthConnectDeviceRepository["Service"]["remove"] = (proofKeyThumbprint) =>
@@ -152,6 +193,7 @@ export const make = Effect.gen(function* () {
     trust,
     isTrusted,
     list,
+    removeLapsed,
     remove,
     removeAllExcept,
   } satisfies AuthConnectDeviceRepository["Service"];

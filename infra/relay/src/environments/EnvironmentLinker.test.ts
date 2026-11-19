@@ -110,17 +110,92 @@ const makeRequest = Effect.gen(function* () {
   };
 });
 
+const makePublishOnlyRequest = (httpBaseUrl = "http://127.0.0.1:3773/") =>
+  Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const expiresAt = DateTime.add(now, { minutes: 5 });
+    const relayTokens = yield* RelayTokens.RelayTokens;
+    const challenge = yield* relayTokens.issueLinkChallenge({
+      userId: "user_123",
+      request: {
+        notificationsEnabled: true,
+        liveActivitiesEnabled: true,
+        managedTunnelsEnabled: false,
+      },
+      jti: "publish-only-challenge-jti",
+      issuedAtEpochSeconds: Math.floor(now.epochMilliseconds / 1_000),
+      expiresAtEpochSeconds: Math.floor(expiresAt.epochMilliseconds / 1_000),
+    });
+    const payload = {
+      iss: "t3-env:env-link-test",
+      aud: "https://relay.example.test",
+      sub: "env-link-test",
+      jti: "publish-only-proof-jti",
+      iat: Math.floor(now.epochMilliseconds / 1_000),
+      exp: Math.floor(expiresAt.epochMilliseconds / 1_000),
+      challenge,
+      environmentId: "env-link-test" as RelayEnvironmentLinkProofPayload["environmentId"],
+      descriptor: {
+        environmentId: "env-link-test" as RelayEnvironmentLinkProofPayload["environmentId"],
+        label: "Link Test Environment",
+        platform: { os: "darwin", arch: "arm64" },
+        serverVersion: "0.0.0-test",
+        capabilities: { repositoryIdentity: true },
+      },
+      environmentPublicKey: environmentKeyPair.publicKey.trim(),
+      endpoint: {
+        httpBaseUrl,
+        wsBaseUrl: httpBaseUrl.replace(/^http/u, "ws"),
+        providerKind: "manual",
+      },
+      origin: { localHttpHost: "127.0.0.1", localHttpPort: 3773 },
+      scopes: ["agent_activity_notifications"],
+    } satisfies RelayEnvironmentLinkProofPayload;
+    const request = {
+      proof: signTestJwt(payload, RELAY_LINK_PROOF_TYP, environmentKeyPair.privateKey),
+      notificationsEnabled: true,
+      liveActivitiesEnabled: true,
+      managedTunnelsEnabled: false,
+    } satisfies RelayEnvironmentLinkRequest;
+    return request;
+  });
+
 function layerTest(input?: {
+  readonly channels?: boolean;
+  readonly maxEnvironmentsPerUser?: number;
+  readonly activeLinks?: number;
   readonly upsert?: EnvironmentLinks.EnvironmentLinks["Service"]["upsert"];
+  readonly create?: EnvironmentCredentials.EnvironmentCredentials["Service"]["create"];
+  readonly transaction?: { open: boolean; outcome?: "committed" | "rolled-back" };
   readonly consume?: DpopProofs.DpopProofReplay["Service"]["consume"];
   readonly deprovision?: ManagedEndpointProvider.ManagedEndpointProvider["Service"]["deprovision"];
 }) {
+  const transaction = input?.transaction ?? { open: false };
   return EnvironmentLinker.layer.pipe(
     Layer.provideMerge(RelayTokens.layer.pipe(Layer.provide(CloudMintSigner.layer))),
     Layer.provide(
       Layer.mergeAll(
-        RelayConfiguration.layer(config),
-        Layer.succeed(RelayDb.RelayTransactions, { withTransaction: (effect) => effect }),
+        RelayConfiguration.layer({
+          ...config,
+          ...(input?.channels ? { channels: true } : {}),
+          ...(input?.maxEnvironmentsPerUser === undefined
+            ? {}
+            : { maxEnvironmentsPerUser: input.maxEnvironmentsPerUser }),
+        }),
+        Layer.succeed(RelayDb.RelayTransactions, {
+          withTransaction: (effect) =>
+            Effect.sync(() => {
+              transaction.open = true;
+            }).pipe(
+              Effect.andThen(effect),
+              Effect.onExit((exit) =>
+                Effect.sync(() => {
+                  transaction.open = false;
+                  transaction.outcome = exit._tag === "Success" ? "committed" : "rolled-back";
+                }),
+              ),
+            ),
+        }),
         Layer.succeed(DpopProofs.DpopProofReplay, {
           verifyAndConsume: () => Effect.die("unexpected DPoP proof verification"),
           consume: input?.consume ?? (() => Effect.succeed(true)),
@@ -129,7 +204,8 @@ function layerTest(input?: {
         Layer.succeed(EnvironmentLinks.EnvironmentLinks, {
           upsert: input?.upsert ?? (() => Effect.void),
           listDeliveryUsersForEnvironment: () => Effect.succeed([]),
-          listForUser: () => Effect.succeed([]),
+          listForUser: () =>
+            Effect.succeed(Array.from({ length: input?.activeLinks ?? 0 }, () => ({}) as never)),
           getForUser: () => Effect.succeed(null),
           findActiveManagedForEnvironment: () => Effect.succeed([]),
           updateLiveActivityPreference: () =>
@@ -138,9 +214,10 @@ function layerTest(input?: {
           revokeForUser: () => Effect.succeed(false),
         }),
         Layer.succeed(EnvironmentCredentials.EnvironmentCredentials, {
-          create: () => Effect.succeed("t3env_credential_secret"),
+          create: input?.create ?? (() => Effect.succeed("t3env_credential_secret")),
           authenticate: () => Effect.succeedNone,
           revokeForEnvironmentPublicKey: () => Effect.succeed(false),
+          pruneRevoked: () => Effect.die("unused"),
         }),
         Layer.succeed(ManagedEndpointProvider.ManagedEndpointProvider, {
           reconcileOrigin: () => Effect.succeed("ready"),
@@ -166,6 +243,8 @@ function layerTest(input?: {
 describe("EnvironmentLinker", () => {
   it.effect("uses verified JWT claims when linking an environment", () => {
     let persistedEnvironmentId: string | null = null;
+    const transaction: { open: boolean; outcome?: "committed" | "rolled-back" } = { open: false };
+    const writesInTransaction: Array<boolean> = [];
     return Effect.gen(function* () {
       const { request, payload } = yield* makeRequest;
       const linker = yield* EnvironmentLinker.EnvironmentLinker;
@@ -173,12 +252,54 @@ describe("EnvironmentLinker", () => {
       expect(result.environmentId).toBe(payload.environmentId);
       expect(result.environmentCredential).toBe("t3env_credential_secret");
       expect(persistedEnvironmentId).toBe(payload.environmentId);
+      // The link and its credential commit together or not at all.
+      expect(writesInTransaction).toEqual([true, true]);
+      expect(transaction.outcome).toBe("committed");
     }).pipe(
       Effect.provide(
         layerTest({
+          transaction,
+          maxEnvironmentsPerUser: 2,
+          activeLinks: 2,
           upsert: (input) =>
             Effect.sync(() => {
+              writesInTransaction.push(transaction.open);
               persistedEnvironmentId = input.proof.environmentId;
+            }),
+          create: () =>
+            Effect.sync(() => {
+              writesInTransaction.push(transaction.open);
+              return "t3env_credential_secret";
+            }),
+        }),
+      ),
+    );
+  });
+
+  it.effect("refuses a link past the account's cap and rolls the link back", () => {
+    const transaction: { open: boolean; outcome?: "committed" | "rolled-back" } = { open: false };
+    let credentialCreated = false;
+    return Effect.gen(function* () {
+      const { request } = yield* makeRequest;
+      const linker = yield* EnvironmentLinker.EnvironmentLinker;
+      const error = yield* Effect.flip(linker.link({ userId: "user_123", request }));
+      expect(error).toMatchObject({
+        _tag: "ManagedTunnelLimitExceeded",
+        maxTunnels: 2,
+        activeTunnels: 2,
+      });
+      expect(transaction.outcome).toBe("rolled-back");
+      expect(credentialCreated).toBe(false);
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          transaction,
+          maxEnvironmentsPerUser: 2,
+          activeLinks: 3,
+          create: () =>
+            Effect.sync(() => {
+              credentialCreated = true;
+              return "t3env_credential_secret";
             }),
         }),
       ),
@@ -189,51 +310,7 @@ describe("EnvironmentLinker", () => {
     let persistedEndpoint: string | null = null;
     let deprovisionedEnvironmentId: string | null = null;
     return Effect.gen(function* () {
-      const now = yield* DateTime.now;
-      const expiresAt = DateTime.add(now, { minutes: 5 });
-      const relayTokens = yield* RelayTokens.RelayTokens;
-      const challenge = yield* relayTokens.issueLinkChallenge({
-        userId: "user_123",
-        request: {
-          notificationsEnabled: true,
-          liveActivitiesEnabled: true,
-          managedTunnelsEnabled: false,
-        },
-        jti: "publish-only-challenge-jti",
-        issuedAtEpochSeconds: Math.floor(now.epochMilliseconds / 1_000),
-        expiresAtEpochSeconds: Math.floor(expiresAt.epochMilliseconds / 1_000),
-      });
-      const payload = {
-        iss: "t3-env:env-link-test",
-        aud: "https://relay.example.test",
-        sub: "env-link-test",
-        jti: "publish-only-proof-jti",
-        iat: Math.floor(now.epochMilliseconds / 1_000),
-        exp: Math.floor(expiresAt.epochMilliseconds / 1_000),
-        challenge,
-        environmentId: "env-link-test" as RelayEnvironmentLinkProofPayload["environmentId"],
-        descriptor: {
-          environmentId: "env-link-test" as RelayEnvironmentLinkProofPayload["environmentId"],
-          label: "Link Test Environment",
-          platform: { os: "darwin", arch: "arm64" },
-          serverVersion: "0.0.0-test",
-          capabilities: { repositoryIdentity: true },
-        },
-        environmentPublicKey: environmentKeyPair.publicKey.trim(),
-        endpoint: {
-          httpBaseUrl: "http://127.0.0.1:3773/",
-          wsBaseUrl: "ws://127.0.0.1:3773/",
-          providerKind: "manual",
-        },
-        origin: { localHttpHost: "127.0.0.1", localHttpPort: 3773 },
-        scopes: ["agent_activity_notifications"],
-      } satisfies RelayEnvironmentLinkProofPayload;
-      const request = {
-        proof: signTestJwt(payload, RELAY_LINK_PROOF_TYP, environmentKeyPair.privateKey),
-        notificationsEnabled: true,
-        liveActivitiesEnabled: true,
-        managedTunnelsEnabled: false,
-      } satisfies RelayEnvironmentLinkRequest;
+      const request = yield* makePublishOnlyRequest();
       const linker = yield* EnvironmentLinker.EnvironmentLinker;
       const result = yield* linker.link({ userId: "user_123", request });
       expect(result.environmentCredential).toBe("t3env_credential_secret");
@@ -256,6 +333,47 @@ describe("EnvironmentLinker", () => {
       ),
     );
   });
+
+  it.effect.each([
+    ["no public address", "http://127.0.0.1:3773/"],
+    // Manual endpoints are off by default, so the relay may not contact even a public one.
+    ["a public address", "https://env.example.test/"],
+  ] as const)(
+    "carries a publish-only environment with %s over a relay channel",
+    ([_name, address]) => {
+      let persistedEndpoint: string | null = null;
+      return Effect.gen(function* () {
+        const request = yield* makePublishOnlyRequest(address);
+        const linker = yield* EnvironmentLinker.EnvironmentLinker;
+        const result = yield* linker.link({ userId: "user_123", request });
+        expect(result.endpoint).toEqual({
+          httpBaseUrl: expect.stringMatching(
+            /^https:\/\/relay\.example\.test\/env\/[0-9a-f]{32}\/$/u,
+          ),
+          wsBaseUrl: expect.stringMatching(
+            /^wss:\/\/relay\.example\.test\/env\/[0-9a-f]{32}\/ws$/u,
+          ),
+          providerKind: "t3_relay",
+        });
+        expect(persistedEndpoint).toBe(result.endpoint.httpBaseUrl);
+        expect(result.endpointRuntime).toEqual({
+          providerKind: "t3_relay",
+          connectorToken: "t3env_credential_secret",
+          channelUrl: "https://relay.example.test/v1/environments/env-link-test/channel",
+        });
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            channels: true,
+            upsert: (input) =>
+              Effect.sync(() => {
+                persistedEndpoint = input.endpoint.httpBaseUrl;
+              }),
+          }),
+        ),
+      );
+    },
+  );
 
   it.effect("rejects a tampered compact proof before persistence", () => {
     let persisted = false;

@@ -38,6 +38,7 @@ import {
   verifyRelayJwt,
 } from "@t3tools/shared/relayJwt";
 import { isSecureRelayUrl, normalizeSecureRelayUrl } from "@t3tools/shared/relayUrl";
+import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Signature from "effect/crypto/Signature";
@@ -86,8 +87,10 @@ import {
   HOLD_WEBHOOKS_WHILE_OFFLINE_SECRET,
   PUBLISH_AGENT_ACTIVITY_SECRET,
   readRelayConnection,
+  readRelayRemoteControlAllowed,
   RELAY_ENVIRONMENT_CREDENTIAL_SECRET,
   RELAY_ISSUER_SECRET,
+  RELAY_REMOTE_CONTROL_OFF_SECRET,
   RELAY_URL_SECRET,
 } from "./config.ts";
 import { EnvironmentSigningKey } from "./environmentKeys.ts";
@@ -111,6 +114,7 @@ import {
   linkProofScopes,
   managedEndpointRuntimeConfigsMatch,
   parseManagedEndpointLocalOrigin,
+  parsePublicEndpoint,
 } from "./linkChecks.ts";
 import { desktopUpdateRestartPending, pendingUpdateHandoffExists } from "./updateHandoff.ts";
 
@@ -246,6 +250,7 @@ const INTERNAL_OPERATION_MESSAGES = {
   "read-relay-config": "Could not read environment relay configuration.",
   "remove-relay-config": "Could not remove environment relay configuration.",
   "update-live-activity-preference": "Could not update T3 Connect Live Activity preferences.",
+  "revoke-connect-devices": "Could not revoke the devices T3 Connect enrolled.",
   "update-webhook-settings": "Could not update T3 Connect webhook settings.",
   "read-preferences": "Could not read environment cloud preferences.",
   "persist-preferences": "Could not persist environment cloud preferences.",
@@ -295,6 +300,14 @@ export const shouldRetryCloudLink = (error: unknown): boolean =>
 
 const rollbackFailed = (cause: unknown) =>
   Effect.logWarning("Could not roll back a T3 Connect preference", { cause });
+
+// Where a publish-only link says this machine can be reached; unset keeps the local placeholder.
+const publicEndpointConfig = Config.option(Config.NonEmptyString("T3CODE_PUBLIC_URL"));
+
+function localOriginUrl(origin: RelayManagedEndpointOrigin): string {
+  const host = origin.localHttpHost;
+  return `http://${host.includes(":") && !host.startsWith("[") ? `[${host}]` : host}:${origin.localHttpPort}`;
+}
 
 const requireRelayUrl = relayUrlConfig.pipe(
   Effect.mapError(
@@ -719,6 +732,18 @@ const make = Effect.gen(function* () {
         ]);
         if (Option.isNone(runtimeBytes)) return false;
         const config = Option.getOrNull(decodeRuntimeConfig(bytesToString(runtimeBytes.value)));
+        if (config?.providerKind === "t3_relay") {
+          if (!(yield* readRelayRemoteControlAllowed.pipe(withSecrets))) return false;
+          // The channel dials out and forwards to whatever port this server listens on now.
+          const status = yield* endpointRuntime.applyConfig(config, localOrigin);
+          if (status.status !== "running") {
+            return yield* new CloudLinkEndpointUnavailableError({
+              reason: "runtime-not-started",
+              endpointRuntimeStatus: status,
+            });
+          }
+          return true;
+        }
         if (config === null || config.providerKind !== "cloudflare_tunnel") return false;
         // Require the relay-confirmed port unless falling back after the relay stayed unreachable.
         if (requireConfirmedOrigin) {
@@ -759,7 +784,8 @@ const make = Effect.gen(function* () {
       // Reject unsupported runtimes before they can stop a healthy tunnel.
       if (
         payload.endpointRuntime !== null &&
-        payload.endpointRuntime.providerKind !== "cloudflare_tunnel"
+        payload.endpointRuntime.providerKind !== "cloudflare_tunnel" &&
+        payload.endpointRuntime.providerKind !== "t3_relay"
       ) {
         return yield* new CloudLinkEndpointUnavailableError({
           reason: "runtime-not-started",
@@ -786,11 +812,26 @@ const make = Effect.gen(function* () {
         ) {
           yield* setCliDesiredCloudLink(false).pipe(withSecrets);
         }
+        // Devices that came in through the revoked link must not carry over to the new one.
+        if (Option.isSome(revoked)) {
+          yield* environmentAuth
+            .revokeConnectEnrollments()
+            .pipe(Effect.catch(internalError("revoke-connect-devices")));
+        }
         yield* dropRevokedCloudLink.pipe(withSecrets);
       }
       yield* validateLinkedCloudUser(payload.cloudUserId);
-      const endpointRuntimeJson = payload.endpointRuntime
-        ? yield* encodeEndpointRuntimeConfigJson(payload.endpointRuntime)
+      const remoteControlRefused =
+        payload.endpointRuntime?.providerKind === "t3_relay" &&
+        !(yield* readRelayRemoteControlAllowed.pipe(withSecrets));
+      if (remoteControlRefused) {
+        yield* Effect.logInfo(
+          "T3 Connect remote control through the relay is off; this link only publishes activity.",
+        );
+      }
+      const runtimeConfig = remoteControlRefused ? null : payload.endpointRuntime;
+      const endpointRuntimeJson = runtimeConfig
+        ? yield* encodeEndpointRuntimeConfigJson(runtimeConfig)
         : null;
       yield* endpointRuntime.applyConfig(null);
       yield* secrets.remove(CLOUD_ENDPOINT_CONFIRMED_ORIGIN);
@@ -813,13 +854,16 @@ const make = Effect.gen(function* () {
       if (endpointRuntimeJson !== null) {
         yield* secrets.set(CLOUD_ENDPOINT_RUNTIME_CONFIG, stringToBytes(endpointRuntimeJson));
       }
-      if (payload.endpointRuntime === null || options?.confirmedOrigin === undefined) {
+      if (runtimeConfig === null || options?.confirmedOrigin === undefined) {
         return {
           ok: true,
           endpointRuntimeStatus: { status: "disabled" },
         } satisfies EnvironmentCloudRelayConfigResult;
       }
-      const endpointRuntimeStatus = yield* endpointRuntime.applyConfig(payload.endpointRuntime);
+      const endpointRuntimeStatus = yield* endpointRuntime.applyConfig(
+        runtimeConfig,
+        localOriginUrl(options.confirmedOrigin),
+      );
       if (endpointRuntimeStatus.status !== "running") {
         return yield* new CloudLinkEndpointUnavailableError({
           reason: "runtime-not-started",
@@ -827,7 +871,7 @@ const make = Effect.gen(function* () {
         });
       }
       const marker = yield* encodeConfirmedOriginJson({
-        config: payload.endpointRuntime,
+        config: runtimeConfig,
         origin: options.confirmedOrigin,
       });
       yield* secrets.set(CLOUD_ENDPOINT_CONFIRMED_ORIGIN, stringToBytes(marker));
@@ -870,6 +914,17 @@ const make = Effect.gen(function* () {
       );
       const mode = yield* readCliDesiredLinkMode.pipe(withSecrets);
       const managedTunnelsEnabled = mode !== "publish_only";
+      const configuredPublicEndpoint = managedTunnelsEnabled
+        ? Option.none()
+        : yield* publicEndpointConfig.pipe(
+            Effect.mapError(() => new CloudLinkOriginInvalidError({ origin: "endpoint" })),
+          );
+      const publicEndpoint = Option.isSome(configuredPublicEndpoint)
+        ? yield* Effect.try({
+            try: () => parsePublicEndpoint(configuredPublicEndpoint.value),
+            catch: () => new CloudLinkOriginInvalidError({ origin: "endpoint" }),
+          })
+        : null;
       const relayUrl = yield* requireRelayUrl;
       const challenge = yield* relayClientRequest({
         url: `${relayUrl}/v1/client/environment-link-challenges`,
@@ -885,8 +940,8 @@ const make = Effect.gen(function* () {
         challenge: challenge.challenge,
         relayIssuer: relayUrl,
         endpoint: {
-          httpBaseUrl: parsedOrigin.httpBaseUrl,
-          wsBaseUrl: parsedOrigin.wsBaseUrl,
+          httpBaseUrl: publicEndpoint?.httpBaseUrl ?? parsedOrigin.httpBaseUrl,
+          wsBaseUrl: publicEndpoint?.wsBaseUrl ?? parsedOrigin.wsBaseUrl,
           providerKind: managedTunnelsEnabled ? "cloudflare_tunnel" : "manual",
         },
         origin: parsedOrigin.origin,
@@ -1179,6 +1234,21 @@ const make = Effect.gen(function* () {
   const applyRelayConfig = Effect.fn("environment.cloud.relayConfig")(
     function* (payload: RelayEnvironmentConfigRequest) {
       const result = yield* applyCloudRelayConfig(payload, { replaceRevokedLink: true });
+      if (payload.endpointRuntime?.providerKind === "t3_relay") {
+        const address = httpServer.address;
+        if (typeof address === "string" || !("port" in address)) {
+          return yield* new CloudLinkInternalError({ operation: "resolve-server-origin" });
+        }
+        const started = yield* startManagedTunnelIfOriginConfirmed(
+          `http://${loopbackUrlHostForAddress(address)}:${address.port}`,
+        );
+        return started
+          ? ({
+              ok: true,
+              endpointRuntimeStatus: { status: "running", providerKind: "t3_relay" },
+            } satisfies EnvironmentCloudRelayConfigResult)
+          : result;
+      }
       if (payload.endpointRuntime?.providerKind === "cloudflare_tunnel") {
         const address = httpServer.address;
         if (typeof address === "string" || !("port" in address)) {
@@ -1223,7 +1293,14 @@ const make = Effect.gen(function* () {
     "environment.cloud.releaseManagedTunnelOnShutdown",
   )(function* () {
     const runtimeConfig = yield* secrets.get(CLOUD_ENDPOINT_RUNTIME_CONFIG);
-    if (Option.isNone(runtimeConfig)) {
+    // A relay channel has no tunnel to release, and the next start needs its config.
+    if (
+      Option.isNone(runtimeConfig) ||
+      Option.exists(
+        decodeRuntimeConfig(bytesToString(runtimeConfig.value)),
+        (config) => config.providerKind === "t3_relay",
+      )
+    ) {
       return false;
     }
     // CLI authorization releases only CLI-desired managed links; web/mobile links recover by credential and expire through the relay reaper.
@@ -1345,6 +1422,10 @@ const make = Effect.gen(function* () {
       return yield* endpointRuntime.withLinkStateLock(
         Effect.gen(function* () {
           const endpointRuntimeStatus = yield* endpointRuntime.applyConfig(null);
+          // Devices came in through this link; they must not outlive it or carry over to the next.
+          yield* environmentAuth
+            .revokeConnectEnrollments()
+            .pipe(Effect.catch(internalError("revoke-connect-devices")));
           yield* Effect.all(
             [
               secrets.remove(CLOUD_LINKED_USER_ID),
@@ -1357,6 +1438,7 @@ const make = Effect.gen(function* () {
               secrets.remove(PUBLISH_AGENT_ACTIVITY_SECRET),
               secrets.remove(HOLD_WEBHOOKS_WHILE_OFFLINE_SECRET),
               secrets.remove(CLOUD_LINK_REVOKED),
+              secrets.remove(RELAY_REMOTE_CONTROL_OFF_SECRET),
             ],
             { concurrency: 10 },
           );

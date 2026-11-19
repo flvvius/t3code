@@ -1,5 +1,6 @@
 import type { getClerkInstance } from "@clerk/expo";
 import {
+  type CloudAccountSource,
   createCloudAccountService,
   ManagedRelay,
   setManagedRelaySession,
@@ -45,13 +46,31 @@ export function activateCloudRelayAccount(
   });
 }
 
+/**
+ * The relay accepts the device's unregistration only with a valid token, so the device leaves
+ * before the session does; otherwise the relay keeps pushing to a signed-out phone.
+ */
+export async function signOutAndUnregisterDevice(
+  readToken: () => Promise<string | null>,
+  signOut: () => Promise<unknown>,
+): Promise<void> {
+  await runtime.runPromise(
+    unregisterAgentAwarenessDeviceForCurrentUser(readToken).pipe(
+      Effect.timeout("5 seconds"),
+      Effect.ignore,
+    ),
+  );
+  await signOut();
+}
+
 function clerkTokenReader(clerk: ClerkInstance): () => Promise<string | null> {
   return async () =>
     clerk.session ? await clerk.session.getToken(resolveRelayClerkTokenOptions()) : null;
 }
 
-const cleanUpCloudAccount = async (
-  clerk: ClerkInstance,
+const cleanUpCloudAccount = async <S>(
+  readToken: (source: S) => () => Promise<string | null>,
+  source: S,
   accountId: string | null,
   wasActive: boolean,
 ) => {
@@ -69,9 +88,7 @@ const cleanUpCloudAccount = async (
     ...(wasActive
       ? [
           settleAsyncResult(() =>
-            runtime.runPromiseExit(
-              unregisterAgentAwarenessDeviceForCurrentUser(clerkTokenReader(clerk)),
-            ),
+            runtime.runPromiseExit(unregisterAgentAwarenessDeviceForCurrentUser(readToken(source))),
           ),
         ]
       : []),
@@ -81,28 +98,36 @@ const cleanUpCloudAccount = async (
   }
 };
 
-export const cloudAccountService = createCloudAccountService<ClerkInstance>({
-  deactivate: deactivateCloudRelayAccount,
-  // Detaching is not a sign-out: the user is usually still signed in, so keep
-  // lock-screen activities and the persisted registration for the next attach.
-  detach: () => {
-    releaseAgentAwarenessRelayTokenProvider();
-    setManagedRelaySession(appAtomRegistry, null);
-  },
-  // A not-yet-presented onboarding request belongs to the account that left.
-  onSignOutTransition: clearConnectOnboardingRequest,
-  cleanUp: ({ source, accountId, wasActive }) => cleanUpCloudAccount(source, accountId, wasActive),
-  prepare: async ({ source, accountId, isCurrent }) => {
-    const storedAccount = await getComposerCloudAccountId();
-    if (storedAccount !== null && storedAccount !== accountId) {
-      await cleanUpCloudAccount(source, storedAccount, false);
-    }
-    if (!isCurrent()) return;
-    await restoreCloudComposerDrafts(accountId);
-  },
-  activate: ({ source, accountId, isAccountTransition }) => {
-    activateCloudRelayAccount(accountId, clerkTokenReader(source));
-    // Issued after cleanup so the sheet never lists the previous account's environments.
-    if (isAccountTransition) requestConnectOnboarding(accountId);
-  },
-});
+/** Shared by every sign-in provider: only how a source yields its relay token differs. */
+export function createCloudRelayAccountService<S extends CloudAccountSource>(
+  readToken: (source: S) => () => Promise<string | null>,
+) {
+  return createCloudAccountService<S>({
+    deactivate: deactivateCloudRelayAccount,
+    // Detaching is not a sign-out: the user is usually still signed in, so keep
+    // lock-screen activities and the persisted registration for the next attach.
+    detach: () => {
+      releaseAgentAwarenessRelayTokenProvider();
+      setManagedRelaySession(appAtomRegistry, null);
+    },
+    // A not-yet-presented onboarding request belongs to the account that left.
+    onSignOutTransition: clearConnectOnboardingRequest,
+    cleanUp: ({ source, accountId, wasActive }) =>
+      cleanUpCloudAccount(readToken, source, accountId, wasActive),
+    prepare: async ({ source, accountId, isCurrent }) => {
+      const storedAccount = await getComposerCloudAccountId();
+      if (storedAccount !== null && storedAccount !== accountId) {
+        await cleanUpCloudAccount(readToken, source, storedAccount, false);
+      }
+      if (!isCurrent()) return;
+      await restoreCloudComposerDrafts(accountId);
+    },
+    activate: ({ source, accountId, isAccountTransition }) => {
+      activateCloudRelayAccount(accountId, readToken(source));
+      // Issued after cleanup so the sheet never lists the previous account's environments.
+      if (isAccountTransition) requestConnectOnboarding(accountId);
+    },
+  });
+}
+
+export const cloudAccountService = createCloudRelayAccountService<ClerkInstance>(clerkTokenReader);

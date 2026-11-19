@@ -25,8 +25,13 @@ import {
   type DpopFailureReason as DpopFailureReasonType,
   mcpClientScopes,
 } from "@t3tools/contracts";
-import { isLocalLoopbackHost } from "@t3tools/shared/hostClassification";
+import {
+  isLocalLoopbackHost,
+  isPrivateNetworkHost,
+  normalizeHostname,
+} from "@t3tools/shared/hostClassification";
 import { encodeOAuthScope } from "@t3tools/shared/oauthScope";
+import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Digest from "effect/crypto/Digest";
 import * as DateTime from "effect/DateTime";
@@ -572,6 +577,11 @@ export class EnvironmentAuth extends Context.Service<
     readonly revokeConnectDevice: (
       proofKeyThumbprint: string,
     ) => Effect.Effect<boolean, ServerAuthInternalError>;
+    /**
+     * Forgets every device T3 Connect enrolled and ends its sessions and unspent credentials,
+     * for when the link they came through goes away. Returns how many devices and sessions went.
+     */
+    readonly revokeConnectEnrollments: () => Effect.Effect<number, ServerAuthInternalError>;
     readonly issuePairingCredential: (
       input?: AuthCreatePairingCredentialInput,
     ) => Effect.Effect<
@@ -795,6 +805,31 @@ function isBrowserOriginAllowed(
   );
 }
 
+function hostnameOf(value: string): string | null {
+  try {
+    const hostname = new URL(value.includes("://") ? value : `http://${value}`).hostname;
+    return hostname === "" ? null : normalizeHostname(hostname);
+  } catch {
+    return null;
+  }
+}
+
+const isIpLiteral = (hostname: string) =>
+  hostname.includes(":") || /^\d{1,3}(?:\.\d{1,3}){3}$/u.test(hostname);
+
+// A DNS-rebinding page reaches this listener under the attacker's own name. Names public DNS
+// cannot point here (IP literals, local and tailnet names) pass; any other name must be configured.
+function isExpectedCookieHost(
+  hostHeader: string | undefined,
+  configuredHosts: ReadonlySet<string>,
+): boolean {
+  if (hostHeader === undefined || configuredHosts.has("*")) return true;
+  if (/[@/\\?#\s]/u.test(hostHeader)) return false;
+  const hostname = hostnameOf(hostHeader);
+  if (hostname === null) return false;
+  return isIpLiteral(hostname) || isPrivateNetworkHost(hostname) || configuredHosts.has(hostname);
+}
+
 /** @public */
 export const make = Effect.gen(function* () {
   const policy = yield* EnvironmentAuthPolicy.EnvironmentAuthPolicy;
@@ -858,6 +893,29 @@ export const make = Effect.gen(function* () {
     ...config.devAllowedOrigins,
   ]);
 
+  const [publicUrl, allowedHosts] = yield* Effect.all([
+    Config.String("T3CODE_PUBLIC_URL").pipe(Config.withDefault("")),
+    Config.String("T3CODE_ALLOWED_HOSTS").pipe(Config.withDefault("")),
+  ]).pipe(Effect.orElseSucceed(() => ["", ""] as const));
+  const expectedCookieHosts = new Set<string>(
+    [
+      ...(config.host ? [config.host] : []),
+      ...(config.devUrl ? [config.devUrl.href] : []),
+      ...config.devAllowedOrigins,
+      ...(publicUrl ? [publicUrl] : []),
+    ]
+      .map(hostnameOf)
+      .filter((hostname) => hostname !== null)
+      .concat(
+        allowedHosts
+          .split(",")
+          .map((entry) => entry.trim())
+          .filter((entry) => entry !== "")
+          .map((entry) => (entry === "*" ? entry : hostnameOf(entry)))
+          .filter((hostname) => hostname !== null),
+      ),
+  );
+
   const authenticateRequest = (
     request: HttpServerRequest.HttpServerRequest,
   ): Effect.Effect<AuthenticatedSession, ServerAuthCredentialError | ServerAuthInternalError> => {
@@ -873,6 +931,17 @@ export const make = Effect.gen(function* () {
       return Effect.fail(
         new ServerAuthInvalidCredentialError({
           diagnostic: "Browser sessions are only accepted from the app's own origin.",
+        }),
+      );
+    }
+    if (
+      isBrowserCookieCredential(credential.source) &&
+      !isExpectedCookieHost(firstHeaderValue(request.headers.host), expectedCookieHosts)
+    ) {
+      return Effect.fail(
+        new ServerAuthInvalidCredentialError({
+          diagnostic:
+            "Browser sessions are only accepted at this server's own host names. Add this one to T3CODE_ALLOWED_HOSTS.",
         }),
       );
     }
@@ -1317,6 +1386,29 @@ export const make = Effect.gen(function* () {
     }).pipe(connectTrustLock.withPermits(1));
   });
 
+  const revokeConnectEnrollments: EnvironmentAuth["Service"]["revokeConnectEnrollments"] =
+    Effect.fn("EnvironmentAuth.revokeConnectEnrollments")(function* () {
+      return yield* Effect.gen(function* () {
+        const devices = yield* bootstrapCredentials
+          .revokeConnectDevicesExcept(null)
+          .pipe(Effect.mapError((cause) => new ServerAuthConnectDevicesError({ cause })));
+        const connectSessions = (yield* sessions
+          .listActive()
+          .pipe(
+            Effect.mapError((cause) => new ServerAuthSessionRevocationError({ cause })),
+          )).filter((session) => session.subject === CLOUD_CONNECT_SUBJECT);
+        yield* Effect.forEach(
+          connectSessions,
+          (session) =>
+            sessions
+              .revoke(session.sessionId)
+              .pipe(Effect.mapError((cause) => new ServerAuthSessionRevocationError({ cause }))),
+          { discard: true },
+        );
+        return devices + connectSessions.length;
+      }).pipe(connectTrustLock.withPermits(1));
+    });
+
   const connectDevicesShowingCode: EnvironmentAuth["Service"]["connectDevicesShowingCode"] =
     Effect.fn("EnvironmentAuth.connectDevicesShowingCode")(function* (verificationCode) {
       const wanted = normalizeVerificationCode(verificationCode);
@@ -1668,6 +1760,7 @@ export const make = Effect.gen(function* () {
     listConnectDevices,
     revokeConnectDevice,
     connectDevicesShowingCode,
+    revokeConnectEnrollments,
     issuePairingCredential,
     issueStartupPairingCredential,
     listPairingLinks,

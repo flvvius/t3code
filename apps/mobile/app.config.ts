@@ -12,6 +12,8 @@ process.env.EXPO_NO_TYPESCRIPT_SETUP = "1";
 
 const APP_VARIANT = resolveAppVariant(repoEnv.APP_VARIANT);
 const isIosPersonalTeamBuild = repoEnv.T3CODE_IOS_PERSONAL_TEAM === "1";
+const isEnabled = (value: string | undefined) =>
+  ["1", "true"].includes(value?.trim().toLowerCase() ?? "");
 const runtimeVersionPolicy =
   process.env.MOBILE_VERSION_POLICY ??
   (APP_VARIANT === "development" ? "appVersion" : "fingerprint");
@@ -246,7 +248,8 @@ const config: ExpoConfig = {
   icon: variant.assets.appIcon,
   userInterfaceStyle: "automatic",
   updates: {
-    enabled: repoEnv.T3CODE_MOBILE_UPDATES_ENABLED !== "0",
+    // Opt-in: the update source below is upstream's Expo project, which could replace this build's JavaScript.
+    enabled: repoEnv.T3CODE_MOBILE_UPDATES_ENABLED === "1",
     url: "https://u.expo.dev/d763fcb8-d37c-41ea-a773-b54a0ab4a454",
     checkAutomatically: "ON_LOAD",
     fallbackToCacheTimeout: 0,
@@ -453,7 +456,16 @@ const config: ExpoConfig = {
     ["expo-sensors", { motionPermission: false }],
     // Mods run in reverse order; expo-widgets must create and wipe the target before assets are added.
     ...(!isIosPersonalTeamBuild ? ["./plugins/withWidgetLogoAsset.cjs", widgetsPlugin] : []),
-    "./plugins/withAndroidNetworkSecurityConfig.cjs",
+    [
+      "./plugins/withAndroidNetworkSecurityConfig.cjs",
+      {
+        // Development builds load from Metro over http and keep the permissive defaults.
+        allowCleartext:
+          APP_VARIANT === "development" || isEnabled(repoEnv.T3CODE_ANDROID_ALLOW_CLEARTEXT),
+        trustUserCertificates:
+          APP_VARIANT === "development" || isEnabled(repoEnv.T3CODE_ANDROID_TRUST_USER_CAS),
+      },
+    ],
     "./plugins/withAndroidGradleHeap.cjs",
     "./plugins/withAndroidInputBackground.cjs",
     "./plugins/withAndroidModernPopupMenu.cjs",
@@ -472,10 +484,16 @@ const config: ExpoConfig = {
     iosPersonalTeamBuild: isIosPersonalTeamBuild,
     relay: {
       url: repoEnv.T3CODE_RELAY_URL ?? null,
+      pinned: repoEnv.T3CODE_RELAY_PINNED ?? null,
+      allowlist: repoEnv.T3CODE_RELAY_ALLOWLIST ?? null,
     },
     clerk: {
       publishableKey: repoEnv.EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY ?? null,
       jwtTemplate: repoEnv.EXPO_PUBLIC_CLERK_JWT_TEMPLATE ?? null,
+    },
+    oidc: {
+      issuer: repoEnv.EXPO_PUBLIC_OIDC_ISSUER ?? null,
+      clientId: repoEnv.EXPO_PUBLIC_OIDC_CLIENT_ID ?? null,
     },
     // Clerk reads these exact names at prebuild. Omit unset values: manifest null becomes truthy {}.
     EXPO_PUBLIC_CLERK_GOOGLE_WEB_CLIENT_ID: repoEnv.EXPO_PUBLIC_CLERK_GOOGLE_WEB_CLIENT_ID,

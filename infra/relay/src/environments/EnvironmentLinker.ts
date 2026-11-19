@@ -14,16 +14,19 @@ import * as Signature from "effect/crypto/Signature";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
-import * as SqlError from "effect/sql/SqlError";
 
 import * as DpopProofs from "../auth/DpopProofs.ts";
 import * as RelayTokens from "../auth/RelayTokens.ts";
-import * as RelayDb from "../db.ts";
+import { validateManualEndpoint } from "./EnvironmentConnector.ts";
 import * as EnvironmentCredentials from "./EnvironmentCredentials.ts";
 import * as EnvironmentLinks from "./EnvironmentLinks.ts";
 import * as ManagedEndpointProvider from "./ManagedEndpointProvider.ts";
+import { channelEndpoint, channelKey } from "./RelayChannelEndpoint.ts";
 import * as RelayConfiguration from "../Config.ts";
+import * as RelayDb from "../db.ts";
+import * as ManagedTunnelLimits from "./ManagedTunnelLimits.ts";
 
 export class EnvironmentLinkProofExpired extends Schema.TaggedError<EnvironmentLinkProofExpired>()(
   "EnvironmentLinkProofExpired",
@@ -71,6 +74,7 @@ export type EnvironmentLinkError =
   | DpopProofs.DpopProofReplayPersistenceError
   | EnvironmentLinks.EnvironmentLinkUpsertPersistenceError
   | EnvironmentCredentials.EnvironmentCredentialCreatePersistenceError
+  | ManagedTunnelLimits.ManagedTunnelLimitExceeded
   | ManagedEndpointProvider.ManagedEndpointProviderError;
 
 export class EnvironmentLinker extends Context.Service<
@@ -315,7 +319,21 @@ const make = Effect.gen(function* () {
             origin: verified.origin,
           })
         : null;
-      const endpoint = provisioned?.endpoint ?? verified.endpoint;
+      // A publish-only link with no address the relay may contact is carried over a relay channel.
+      const manualEndpoints = config.manualEndpoints ?? "off";
+      const channel =
+        !input.request.managedTunnelsEnabled &&
+        config.channels === true &&
+        (manualEndpoints === "off" ||
+          Result.isFailure(
+            validateManualEndpoint({ endpoint: verified.endpoint, manualEndpoints }),
+          ))
+          ? channelEndpoint(
+              config.relayIssuer,
+              yield* channelKey(verified.environmentId, verified.environmentPublicKey),
+            )
+          : null;
+      const endpoint = provisioned?.endpoint ?? channel ?? verified.endpoint;
       // Only advertised managed endpoints need secure URLs; publish-only links route out of band.
       if (input.request.managedTunnelsEnabled && !isSecureManagedEndpoint(endpoint)) {
         return yield* new EnvironmentLinkProofInvalid({
@@ -325,32 +343,50 @@ const make = Effect.gen(function* () {
           stage: "validate_endpoint",
         });
       }
+      const persistenceFailed = (cause: unknown) =>
+        new EnvironmentLinks.EnvironmentLinkUpsertPersistenceError({
+          userId: input.userId,
+          environmentId: verified.environmentId,
+          cause,
+        });
+      // One transaction, so a failed or refused link never leaves a link without a credential.
       const environmentCredential = yield* transactions
         .withTransaction(
-          links.upsert({ ...input, proof: verified, endpoint }).pipe(
-            Effect.andThen(
-              credentials.create({
-                environmentId: verified.environmentId,
-                environmentPublicKey: verified.environmentPublicKey,
-              }),
-            ),
-          ),
-        )
-        .pipe(
-          Effect.mapError((cause) =>
-            SqlError.isSqlError(cause)
-              ? new EnvironmentLinks.EnvironmentLinkUpsertPersistenceError({
+          Effect.gen(function* () {
+            yield* links.upsert({ ...input, proof: verified, endpoint });
+            const maxLinks = config.maxEnvironmentsPerUser;
+            if (maxLinks !== undefined) {
+              const active = yield* links
+                .listForUser({ userId: input.userId })
+                .pipe(Effect.mapError(persistenceFailed));
+              if (active.length > maxLinks) {
+                return yield* new ManagedTunnelLimits.ManagedTunnelLimitExceeded({
                   userId: input.userId,
                   environmentId: verified.environmentId,
-                  cause,
-                })
-              : cause,
-          ),
-        );
+                  maxTunnels: maxLinks,
+                  activeTunnels: active.length - 1,
+                });
+              }
+            }
+            return yield* credentials.create({
+              environmentId: verified.environmentId,
+              environmentPublicKey: verified.environmentPublicKey,
+            });
+          }),
+        )
+        .pipe(Effect.catchTags({ SqlError: (error) => Effect.fail(persistenceFailed(error)) }));
       return {
         environmentId: verified.environmentId,
         endpoint,
-        endpointRuntime: provisioned?.runtime ?? null,
+        endpointRuntime:
+          provisioned?.runtime ??
+          (channel
+            ? {
+                providerKind: "t3_relay" as const,
+                connectorToken: environmentCredential,
+                channelUrl: `${normalizeRelayIssuer(config.relayIssuer)}/v1/environments/${encodeURIComponent(verified.environmentId)}/channel`,
+              }
+            : null),
         environmentCredential,
       };
     }),
