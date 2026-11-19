@@ -64,6 +64,10 @@ saved totals first, then updates them when Cursor's API responds.
 If recent work is missing or a new model shows no cost, refresh to rescan session history and
 update model pricing.
 
+Automatic pricing downloads LiteLLM's public price table from GitHub about once a day. To keep a
+server from contacting GitHub for this, set `T3CODE_USAGE_PRICE_FETCH=false` in its environment;
+costs then come from a previously downloaded table and your custom prices.
+
 ## Set custom model prices
 
 On web or desktop, open the environment dropdown on **Usage**, then choose **Model prices** to add,

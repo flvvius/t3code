@@ -103,4 +103,10 @@ it("product opt-out disables relay tracing with either built-in or runtime crede
     ),
     null,
   );
+  // Embedded credentials alone do not turn tracing on; only an explicit opt-in does.
+  assert.equal(resolveRelayClientTracingConfig({}, fallback), null);
+  assert.deepEqual(
+    resolveRelayClientTracingConfig({ T3CODE_TELEMETRY_ENABLED: "1" }, fallback),
+    fallback,
+  );
 });
