@@ -6,6 +6,7 @@ import {
   connectDeviceVerificationCode,
 } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -891,6 +892,57 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodePlatformCrypto.layer))(
         } as never);
         expect(state.authenticated).toBe(false);
       }).pipe(Effect.provide(layerEnvironmentAuth({ mode: "web" }))),
+    );
+
+    it.effect.each([
+      { host: "evil.example.com:3773", env: {}, accepted: false },
+      { host: "localhost:3773", env: {}, accepted: true },
+      { host: "203.0.113.9:3773", env: {}, accepted: true },
+      { host: "[::1]:3773", env: {}, accepted: true },
+      { host: "box.tail1234.ts.net", env: {}, accepted: true },
+      { host: "studio.local:3773", env: {}, accepted: true },
+      {
+        host: "t3.example.com",
+        env: { T3CODE_PUBLIC_URL: "https://t3.example.com" },
+        accepted: true,
+      },
+      {
+        host: "proxy.example.com",
+        env: { T3CODE_ALLOWED_HOSTS: "other.example.com, proxy.example.com" },
+        accepted: true,
+      },
+      { host: "evil.example.com", env: { T3CODE_ALLOWED_HOSTS: "*" }, accepted: true },
+    ])(
+      "accepts a same-origin cookie session at $host only when it names this server ($env)",
+      ({ host, env, accepted }) =>
+        Effect.gen(function* () {
+          const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+          const sessions = yield* SessionStore.SessionStore;
+          const pairing = yield* serverAuth.issuePairingCredential();
+          const exchanged = yield* serverAuth.createBrowserSession(
+            pairing.credential,
+            requestMetadata,
+          );
+          const request = {
+            url: "/ws",
+            cookies: { [sessions.cookieName]: exchanged.sessionToken },
+            headers: { host, origin: `http://${host}`, "sec-fetch-site": "same-origin" },
+          } as never;
+
+          const results = yield* Effect.all([
+            Effect.result(serverAuth.authenticateHttpRequest(request)),
+            Effect.result(serverAuth.authenticateWebSocketUpgrade(request, "rpc")),
+          ]);
+          expect(results.map((result) => result._tag)).toEqual(
+            accepted ? ["Success", "Success"] : ["Failure", "Failure"],
+          );
+        }).pipe(
+          Effect.provide(
+            layerEnvironmentAuth({ mode: "web" }).pipe(
+              Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env }))),
+            ),
+          ),
+        ),
     );
 
     it.effect.each(["Bearer", "bearer", "bEaReR"])(

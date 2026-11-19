@@ -331,8 +331,12 @@ const makeTestRelay = Effect.fnUntraced(function* (
       getById: () => Effect.succeedSome(project),
     }),
     Effect.provideService(FetchHttpClient.Fetch, fetch),
-    Effect.provide(NodeCrypto.layer),
-    Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: options.env ?? {} }))),
+    Effect.provide(
+      Layer.mergeAll(
+        NodeCrypto.layer,
+        ConfigProvider.layer(ConfigProvider.fromEnv({ env: options.env ?? {} })),
+      ),
+    ),
   );
   return { relay, secrets, secretReads, currentShell, shellReads, publications, catchUp };
 });

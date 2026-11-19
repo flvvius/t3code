@@ -24,8 +24,13 @@ import {
   type DpopFailureReason as DpopFailureReasonType,
   mcpClientScopes,
 } from "@t3tools/contracts";
-import { isLocalLoopbackHost } from "@t3tools/shared/hostClassification";
+import {
+  isLocalLoopbackHost,
+  isPrivateNetworkHost,
+  normalizeHostname,
+} from "@t3tools/shared/hostClassification";
 import { encodeOAuthScope } from "@t3tools/shared/oauthScope";
+import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Digest from "effect/crypto/Digest";
 import * as DateTime from "effect/DateTime";
@@ -782,6 +787,31 @@ function isBrowserOriginAllowed(
   );
 }
 
+function hostnameOf(value: string): string | null {
+  try {
+    const hostname = new URL(value.includes("://") ? value : `http://${value}`).hostname;
+    return hostname === "" ? null : normalizeHostname(hostname);
+  } catch {
+    return null;
+  }
+}
+
+const isIpLiteral = (hostname: string) =>
+  hostname.includes(":") || /^\d{1,3}(?:\.\d{1,3}){3}$/u.test(hostname);
+
+// A DNS-rebinding page reaches this listener under the attacker's own name. Names public DNS
+// cannot point here (IP literals, local and tailnet names) pass; any other name must be configured.
+function isExpectedCookieHost(
+  hostHeader: string | undefined,
+  configuredHosts: ReadonlySet<string>,
+): boolean {
+  if (hostHeader === undefined || configuredHosts.has("*")) return true;
+  if (/[@/\\?#\s]/u.test(hostHeader)) return false;
+  const hostname = hostnameOf(hostHeader);
+  if (hostname === null) return false;
+  return isIpLiteral(hostname) || isPrivateNetworkHost(hostname) || configuredHosts.has(hostname);
+}
+
 /** @public */
 export const make = Effect.gen(function* () {
   const policy = yield* EnvironmentAuthPolicy.EnvironmentAuthPolicy;
@@ -845,6 +875,29 @@ export const make = Effect.gen(function* () {
     ...config.devAllowedOrigins,
   ]);
 
+  const [publicUrl, allowedHosts] = yield* Effect.all([
+    Config.String("T3CODE_PUBLIC_URL").pipe(Config.withDefault("")),
+    Config.String("T3CODE_ALLOWED_HOSTS").pipe(Config.withDefault("")),
+  ]).pipe(Effect.orElseSucceed(() => ["", ""] as const));
+  const expectedCookieHosts = new Set<string>(
+    [
+      ...(config.host ? [config.host] : []),
+      ...(config.devUrl ? [config.devUrl.href] : []),
+      ...config.devAllowedOrigins,
+      ...(publicUrl ? [publicUrl] : []),
+    ]
+      .map(hostnameOf)
+      .filter((hostname) => hostname !== null)
+      .concat(
+        allowedHosts
+          .split(",")
+          .map((entry) => entry.trim())
+          .filter((entry) => entry !== "")
+          .map((entry) => (entry === "*" ? entry : hostnameOf(entry)))
+          .filter((hostname) => hostname !== null),
+      ),
+  );
+
   const authenticateRequest = (
     request: HttpServerRequest.HttpServerRequest,
   ): Effect.Effect<AuthenticatedSession, ServerAuthCredentialError | ServerAuthInternalError> => {
@@ -860,6 +913,17 @@ export const make = Effect.gen(function* () {
       return Effect.fail(
         new ServerAuthInvalidCredentialError({
           diagnostic: "Browser sessions are only accepted from the app's own origin.",
+        }),
+      );
+    }
+    if (
+      isBrowserCookieCredential(credential.source) &&
+      !isExpectedCookieHost(firstHeaderValue(request.headers.host), expectedCookieHosts)
+    ) {
+      return Effect.fail(
+        new ServerAuthInvalidCredentialError({
+          diagnostic:
+            "Browser sessions are only accepted at this server's own host names. Add this one to T3CODE_ALLOWED_HOSTS.",
         }),
       );
     }

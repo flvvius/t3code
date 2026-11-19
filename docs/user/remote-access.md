@@ -156,6 +156,13 @@ For a server in a terminal, run `t3 serve --lan`. Either way, T3 Code then
 accepts connections from your local network and tailnet, so a pairing code is
 all that keeps other devices on them out.
 
+A browser signed in to the host stays signed in only at an IP address, a local
+or tailnet name, or a name the host knows: its `--host`, the address in
+`T3CODE_PUBLIC_URL`, and the names in `T3CODE_ALLOWED_HOSTS`. Behind a reverse
+proxy that keeps your own domain in the Host header, list that domain in
+`T3CODE_ALLOWED_HOSTS` (comma-separated). This stops a web page that points its
+own domain at your machine from using your browser session.
+
 If a server is already running, generate a fresh link without restarting it:
 
 ```bash
