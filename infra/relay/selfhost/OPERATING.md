@@ -69,8 +69,12 @@ keep their environment sessions until those expire. Run all of these, in order:
 
 1. **Identity provider.** Disable the account or remove it from the app's group, then revoke its
    sessions (in Entra, **Revoke sessions** on the user).
-2. **Relay.** Run `<relay offboarding command>` for the user. It unlinks their environments and
-   revokes those environments' relay credentials.
+2. **Relay.** Run
+   `docker compose exec relay node src/node.mjs offboard --subject <sub> [--issuer <iss>]`
+   with the user's `sub` claim (in Entra, the object's pairwise `sub`, not the email). In one
+   transaction it revokes their environment links and credentials and deletes their device and
+   push registrations; live relay channels close within seconds. `--issuer` defaults to
+   `OIDC_ISSUER`.
 3. **Their machines.** On each machine the user linked, run `t3 auth connect-device list` and
    `t3 auth connect-device revoke <code>` for their devices, then `t3 auth session list` and
    `t3 auth session revoke <id>` for their sessions. If the machine is being returned, wipe it.
@@ -113,9 +117,9 @@ hosted web app.
 ### Android
 
 `apps/mobile/app.config.ts` points the app at upstream's Expo project and over-the-air update
-channel. Build with `T3CODE_MOBILE_UPDATES_ENABLED=0`, or point `updates.url`, `owner` and
-`extra.eas.projectId` at your own Expo project. Otherwise an installed build can download
-upstream JavaScript.
+channel. This fork turns those updates off unless the build sets `T3CODE_MOBILE_UPDATES_ENABLED=1`.
+Only set it after pointing `updates.url`, `owner` and `extra.eas.projectId` at your own Expo
+project; otherwise an installed build can download upstream JavaScript.
 
 - Build locally with `eas build --profile production -p android --local`, signed with an upload
   key your organization holds. Distribute through managed Google Play or your device management,
@@ -130,6 +134,30 @@ upstream JavaScript.
 Host your own web build and register its `/oidc/callback` under **Single-page application**. A
 browser keeps the sign-in session in its profile, so prefer the desktop app on shared or
 unmanaged machines.
+
+## Hardening settings
+
+Defaults are the safe choice; change them only for a reason.
+
+| Where | Variable | Default | Effect |
+|---|---|---|---|
+| Relay | `RELAY_MANUAL_ENDPOINTS` | `off` | Self-declared environment endpoints: `public` refuses private networks, `private` allows them; loopback and link-local are always refused. |
+| Relay | `RELAY_API_MAX_BODY_BYTES` | 1 MiB | Largest relay API request. |
+| Relay | `RELAY_CHANNEL_MAX_BODY_BYTES` | 50 MiB | Largest request carried to an environment. |
+| Relay | `RELAY_MAX_ENVIRONMENTS_PER_USER` | 25 | Environment links per account. |
+| Relay | `<NAME>_FILE` | — | Read a secret such as `DATABASE_URL` from a file. |
+| T3 server | `T3CODE_TELEMETRY_ENABLED` | off | Product analytics and relay tracing. |
+| T3 server | `T3CODE_USAGE_PRICE_FETCH` | on | Model price table download from GitHub. |
+| T3 server | `T3CODE_CONNECT_DEVICE_TRUST_DAYS` | 7 | Days a T3 Connect device stays approved (0 = forever). |
+| T3 server | `T3CODE_RELAY_REMOTE_CONTROL` | on | Remote control through the relay channel. |
+| T3 server | `T3CODE_AGENT_ACTIVITY_PUBLISHING` / `..._REDACT_TITLES` | on / off | Publish agent activity; hide thread and project titles. |
+| T3 server | `T3CODE_ALLOWED_HOSTS` | — | Extra host names for browser sessions behind a reverse proxy. |
+| Client build | `T3CODE_RELAY_PINNED` / `T3CODE_RELAY_ALLOWLIST` | off | Lock clients to `T3CODE_RELAY_URL`, or to a list of relays. |
+| Android build | `T3CODE_ANDROID_ALLOW_CLEARTEXT` / `..._TRUST_USER_CAS` | off | Allow `http://` servers; trust user-installed CAs. |
+| Android build | `T3CODE_MOBILE_UPDATES_ENABLED` | off | Expo over-the-air updates. |
+
+New devices wait for approval by default (`requireConnectDeviceApproval`), and provider update
+checks are off by default (`enableProviderUpdateChecks`); both are in server settings.
 
 ## Known limitations
 

@@ -1384,7 +1384,8 @@ export const ServerSettings = Schema.Struct({
   responseStreamingMode: ResponseStreamingMode.pipe(
     Schema.withDecodingDefault(Effect.succeed("paragraph" as const)),
   ),
-  enableProviderUpdateChecks: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  /** Off by default in this fork: the checks reach upstream release feeds and the model manifest on GitHub. */
+  enableProviderUpdateChecks: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   continueThreadsAfterServerUpdate: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(true)),
   ),
