@@ -1060,6 +1060,16 @@ export interface DesktopBridge {
   getAppBranding: () => DesktopAppBranding | null;
   /** `null` until the desktop host has read the login shell's environment; ask again later. */
   getRelayTelemetryEnabled: () => boolean | null;
+  /** The OpenID Connect session the main process keeps encrypted with the OS keychain. */
+  getOidcSession: () => string | null;
+  /** Null deletes it. Without a keychain the session is kept in memory only. */
+  setOidcSession: (session: string | null) => Promise<void>;
+  /** POSTs a token request to the issuer's discovered token endpoint from the main process. */
+  requestOidcToken: (input: {
+    readonly issuer: string;
+    readonly tokenEndpoint: string;
+    readonly body: string;
+  }) => Promise<{ readonly status: number; readonly body: string }>;
   getPathForFile: (file: File) => string;
   getClientPlatform: () => string;
   restartAudioService?: () => Promise<boolean>;
