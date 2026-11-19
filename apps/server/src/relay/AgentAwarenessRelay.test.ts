@@ -16,6 +16,7 @@ import {
   TurnItemId,
 } from "@t3tools/contracts";
 import { RelayAgentActivityState } from "@t3tools/contracts/relay";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -172,6 +173,7 @@ const makeTestRelay = Effect.fnUntraced(function* (
     readonly readShell?: (threadId: ThreadId) => Effect.Effect<OrchestrationV2ThreadShell | null>;
     readonly domainEvents?: Stream.Stream<OrchestrationV2DomainEvent>;
     readonly catchUpThreads?: ReadonlyArray<OrchestrationV2ThreadShell>;
+    readonly env?: Record<string, string>;
   } = {},
 ) {
   const values = new Map<string, Uint8Array>(
@@ -329,7 +331,12 @@ const makeTestRelay = Effect.fnUntraced(function* (
       getById: () => Effect.succeedSome(project),
     }),
     Effect.provideService(FetchHttpClient.Fetch, fetch),
-    Effect.provide(NodeCrypto.layer),
+    Effect.provide(
+      Layer.mergeAll(
+        NodeCrypto.layer,
+        ConfigProvider.layer(ConfigProvider.fromEnv({ env: options.env ?? {} })),
+      ),
+    ),
   );
   return { relay, secrets, secretReads, currentShell, shellReads, publications, catchUp };
 });
@@ -656,6 +663,25 @@ describe("AgentAwarenessRelay", () => {
       yield* relay.publishThread(THREAD_ID);
       assert.equal(publications.length, 2);
       assert.equal(publications[1]?.state?.threadTitle, "Renamed thread");
+    }),
+  );
+
+  it.effect.each([
+    { env: {}, published: [["Project", "Thread"]] },
+    {
+      env: { T3CODE_AGENT_ACTIVITY_REDACT_TITLES: "true" },
+      published: [["Private project", "Private task"]],
+    },
+    { env: { T3CODE_AGENT_ACTIVITY_PUBLISHING: "false" }, published: [] },
+    { env: { T3CODE_AGENT_ACTIVITY_PUBLISHING: "nope" }, published: [] },
+  ])("publishes titles the host allows with $env", ({ env, published }) =>
+    Effect.gen(function* () {
+      const { relay, publications } = yield* makeTestRelay({ env });
+      yield* relay.publishThread(THREAD_ID);
+      assert.deepStrictEqual(
+        publications.map(({ state }) => [state?.projectTitle, state?.threadTitle]),
+        published,
+      );
     }),
   );
 

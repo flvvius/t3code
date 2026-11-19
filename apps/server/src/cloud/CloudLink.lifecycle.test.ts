@@ -53,6 +53,7 @@ import {
   decodeRuntimeConfig,
   RELAY_ENVIRONMENT_CREDENTIAL_SECRET,
   RELAY_ISSUER_SECRET,
+  RELAY_REMOTE_CONTROL_OFF_SECRET,
   RELAY_URL_SECRET,
 } from "./config.ts";
 import * as CloudLink from "./CloudLink.ts";
@@ -401,6 +402,48 @@ describe("releaseManagedTunnelOnShutdown", () => {
       expect(applyConfigCalls).toEqual([]);
       expect(values.has(CLOUD_ENDPOINT_RUNTIME_CONFIG)).toBe(true);
     }).pipe(provideReleaseHarness({ store, applyConfigCalls, requests }));
+  });
+
+  const relayChannelConfig = {
+    providerKind: "t3_relay" as const,
+    connectorToken: "credential",
+    channelUrl: "wss://relay.example.test/v1/environments/env_123/channel",
+  };
+
+  it.effect("an activity-only link refuses a relay channel the relay hands it", () => {
+    const { store, values } = makeMemorySecretStore([[RELAY_REMOTE_CONTROL_OFF_SECRET, "true"]]);
+    const applyConfigCalls: Array<unknown> = [];
+
+    return Effect.gen(function* () {
+      const link = yield* CloudLink.CloudLink;
+      expect(
+        yield* link.applyRelayConfig({
+          relayUrl: "https://relay.example.test",
+          cloudUserId: "user-123",
+          environmentCredential: "environment-credential",
+          cloudMintPublicKey:
+            "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAqZ2u2LjMoAyG2QTHXmITJ9w6RzZtVUAv394XCcPV0zE=\n-----END PUBLIC KEY-----",
+          endpointRuntime: relayChannelConfig,
+        }),
+      ).toMatchObject({ ok: true, endpointRuntimeStatus: { status: "disabled" } });
+      expect(applyConfigCalls.filter((config) => config !== null)).toEqual([]);
+      expect(values.has(CLOUD_ENDPOINT_RUNTIME_CONFIG)).toBe(false);
+      expect(values.has(CLOUD_LINKED_USER_ID)).toBe(true);
+    }).pipe(provideReleaseHarness({ store, applyConfigCalls, requests: [] }));
+  });
+
+  it.effect("an activity-only link does not start a relay channel stored before", () => {
+    const { store } = makeMemorySecretStore([
+      [CLOUD_ENDPOINT_RUNTIME_CONFIG, JSON.stringify(relayChannelConfig)],
+      [RELAY_REMOTE_CONTROL_OFF_SECRET, "true"],
+    ]);
+    const applyConfigCalls: Array<unknown> = [];
+
+    return Effect.gen(function* () {
+      const link = yield* CloudLink.CloudLink;
+      expect(yield* link.startManagedTunnelIfOriginConfirmed("http://127.0.0.1:3773")).toBe(false);
+      expect(applyConfigCalls).toEqual([]);
+    }).pipe(provideReleaseHarness({ store, applyConfigCalls, requests: [] }));
   });
 
   it.effect("stops the connector, releases the relay tunnel, and drops the dead token", () => {

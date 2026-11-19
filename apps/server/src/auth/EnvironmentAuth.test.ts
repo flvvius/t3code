@@ -6,10 +6,13 @@ import {
   connectDeviceVerificationCode,
 } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as ServerConfig from "../config.ts";
 import { makeDpopKey } from "./dpop.testkit.ts";
@@ -415,6 +418,98 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodePlatformCrypto.layer))(
         }).pipe(Effect.provide(layerEnvironmentAuth())),
     );
 
+    it.effect("forgets every T3 Connect device and session when the link goes away", () =>
+      Effect.gen(function* () {
+        const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+        const trustedKey = "Kq3vZ8sYbTn0eW1pLr5uXc7dHf9gJm2aQs4tVw6yBzE";
+        const waitingKey = "Zp8rT2nVbQ5xWk1mLc7dHf9gJs3aYe4uRt6vXw0yBzE";
+        const owner = yield* serverAuth.issueSession({ label: "Owner" });
+        const exchange = (credential: string, proofKeyThumbprint: string) =>
+          serverAuth.exchangeBootstrapCredentialForAccessToken(
+            credential,
+            undefined,
+            requestMetadata,
+            { proofKeyThumbprint },
+          );
+        const minted = yield* serverAuth.issueConnectCredential({
+          proofKeyThumbprint: trustedKey,
+          requireApproval: false,
+        });
+        yield* exchange(minted.credential, trustedKey);
+        const unspent = yield* serverAuth.issueConnectCredential({
+          proofKeyThumbprint: trustedKey,
+          requireApproval: false,
+        });
+        yield* serverAuth.issueConnectCredential({
+          proofKeyThumbprint: waitingKey,
+          requireApproval: true,
+        });
+
+        expect(yield* serverAuth.revokeConnectEnrollments()).toBe(2);
+
+        expect(yield* serverAuth.listConnectDevices()).toEqual([]);
+        expect(yield* serverAuth.listPairingLinks()).toEqual([]);
+        expect((yield* serverAuth.listSessions()).map((session) => session.sessionId)).toEqual([
+          owner.sessionId,
+        ]);
+        expect((yield* exchange(unspent.credential, trustedKey).pipe(Effect.flip))._tag).toBe(
+          "ServerAuthInvalidCredentialError",
+        );
+        // On the next link the device is new again and waits for approval.
+        const relinked = yield* serverAuth.issueConnectCredential({
+          proofKeyThumbprint: trustedKey,
+          requireApproval: true,
+        });
+        expect((yield* exchange(relinked.credential, trustedKey).pipe(Effect.flip))._tag).toBe(
+          "ServerAuthConnectApprovalPendingError",
+        );
+      }).pipe(Effect.provide(layerEnvironmentAuth())),
+    );
+
+    it.effect("asks a T3 Connect device for approval again once its trust lapses", () =>
+      Effect.gen(function* () {
+        const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+        const deviceKey = "Kq3vZ8sYbTn0eW1pLr5uXc7dHf9gJm2aQs4tVw6yBzE";
+        const approveWaitingDevice = Effect.gen(function* () {
+          const issued = yield* serverAuth.issueConnectCredential({
+            proofKeyThumbprint: deviceKey,
+            requireApproval: true,
+          });
+          const [request] = (yield* serverAuth.listPairingLinks()).filter(
+            (link) => link.connectDeviceRequest !== undefined,
+          );
+          expect(yield* serverAuth.approveConnectDevice(request!.id)).toBe(true);
+          yield* serverAuth.exchangeBootstrapCredentialForAccessToken(
+            issued.credential,
+            undefined,
+            requestMetadata,
+            { proofKeyThumbprint: deviceKey },
+          );
+        });
+        const mintWaits = serverAuth
+          .issueConnectCredential({ proofKeyThumbprint: deviceKey, requireApproval: true })
+          .pipe(
+            Effect.andThen(serverAuth.listPairingLinks()),
+            Effect.map((links) => links.some((link) => link.connectDeviceRequest !== undefined)),
+          );
+
+        yield* approveWaitingDevice;
+        yield* TestClock.adjust(Duration.days(6));
+        expect(yield* mintWaits).toBe(false);
+
+        yield* TestClock.adjust(Duration.days(2));
+        expect(yield* serverAuth.listConnectDevices()).toEqual([]);
+        expect(yield* mintWaits).toBe(true);
+
+        // Approving again starts a new week.
+        yield* approveWaitingDevice;
+        expect(
+          (yield* serverAuth.listConnectDevices()).map((device) => device.proofKeyThumbprint),
+        ).toEqual([deviceKey]);
+        expect(yield* mintWaits).toBe(false);
+      }).pipe(Effect.provide(layerEnvironmentAuth())),
+    );
+
     it.effect("preserves pairing grants after rejecting scopes they do not grant", () =>
       Effect.gen(function* () {
         const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
@@ -797,6 +892,57 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodePlatformCrypto.layer))(
         } as never);
         expect(state.authenticated).toBe(false);
       }).pipe(Effect.provide(layerEnvironmentAuth({ mode: "web" }))),
+    );
+
+    it.effect.each([
+      { host: "evil.example.com:3773", env: {}, accepted: false },
+      { host: "localhost:3773", env: {}, accepted: true },
+      { host: "203.0.113.9:3773", env: {}, accepted: true },
+      { host: "[::1]:3773", env: {}, accepted: true },
+      { host: "box.tail1234.ts.net", env: {}, accepted: true },
+      { host: "studio.local:3773", env: {}, accepted: true },
+      {
+        host: "t3.example.com",
+        env: { T3CODE_PUBLIC_URL: "https://t3.example.com" },
+        accepted: true,
+      },
+      {
+        host: "proxy.example.com",
+        env: { T3CODE_ALLOWED_HOSTS: "other.example.com, proxy.example.com" },
+        accepted: true,
+      },
+      { host: "evil.example.com", env: { T3CODE_ALLOWED_HOSTS: "*" }, accepted: true },
+    ])(
+      "accepts a same-origin cookie session at $host only when it names this server ($env)",
+      ({ host, env, accepted }) =>
+        Effect.gen(function* () {
+          const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+          const sessions = yield* SessionStore.SessionStore;
+          const pairing = yield* serverAuth.issuePairingCredential();
+          const exchanged = yield* serverAuth.createBrowserSession(
+            pairing.credential,
+            requestMetadata,
+          );
+          const request = {
+            url: "/ws",
+            cookies: { [sessions.cookieName]: exchanged.sessionToken },
+            headers: { host, origin: `http://${host}`, "sec-fetch-site": "same-origin" },
+          } as never;
+
+          const results = yield* Effect.all([
+            Effect.result(serverAuth.authenticateHttpRequest(request)),
+            Effect.result(serverAuth.authenticateWebSocketUpgrade(request, "rpc")),
+          ]);
+          expect(results.map((result) => result._tag)).toEqual(
+            accepted ? ["Success", "Success"] : ["Failure", "Failure"],
+          );
+        }).pipe(
+          Effect.provide(
+            layerEnvironmentAuth({ mode: "web" }).pipe(
+              Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env }))),
+            ),
+          ),
+        ),
     );
 
     it.effect.each(["Bearer", "bearer", "bEaReR"])(

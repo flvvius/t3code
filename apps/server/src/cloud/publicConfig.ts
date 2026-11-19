@@ -53,6 +53,12 @@ function normalizeSecureUrl(value: string): string | null {
   }
 }
 
+// The true spellings Config.Boolean accepts.
+const isTelemetryOptedIn = (env: Readonly<Record<string, string | undefined>>) =>
+  ["true", "yes", "on", "1", "y"].includes(
+    env.T3CODE_TELEMETRY_ENABLED?.trim().toLowerCase() ?? "",
+  );
+
 const buildTimeRelayUrl =
   typeof __T3CODE_BUILD_RELAY_URL__ === "undefined"
     ? ""
@@ -97,7 +103,8 @@ export function resolveRelayClientTracingConfig(
   env: Readonly<Record<string, string | undefined>> = process.env,
   fallback = buildTimeRelayClientTracing,
 ) {
-  if (!isRelayTracingEnabled(env)) {
+  // Opt-in like product analytics, even when the build embeds tracing credentials.
+  if (!isTelemetryOptedIn(env) || !isRelayTracingEnabled(env)) {
     return null;
   }
 

@@ -173,6 +173,10 @@ export const make = Effect.gen(function* () {
   const hostEnvironment = yield* HostProcess.Environment;
   const hostPlatform = yield* HostProcess.Platform;
   const hostScope = hostEnvironment[DESKTOP_HOST_SCOPE_ENV]?.trim();
+  // Off: price only from a saved table and overrides, for hosts that must not reach GitHub.
+  const fetchesRates = !["false", "no", "off", "0", "n"].includes(
+    hostEnvironment.T3CODE_USAGE_PRICE_FETCH?.trim().toLowerCase() ?? "",
+  );
   // A mount or a directory's on-disk name does not change under a running server.
   // A miss is not cached: the directory may not exist yet.
   const physicalSourceIds = new Map<string, Promise<string | undefined>>();
@@ -296,6 +300,7 @@ export const make = Effect.gen(function* () {
     const now = yield* Clock.currentTimeMillis;
     const maxAgeMs = force ? RATES_REFRESH_FLOOR_MS : RATES_TTL_MS;
     yield* loadSavedRates;
+    if (!fetchesRates) return;
     if (ratesFetchedAtMs !== null && now - ratesFetchedAtMs < maxAgeMs) return;
     if (ratesLastFailedAtMs !== null && now - ratesLastFailedAtMs < RATES_REFRESH_FLOOR_MS) return;
 

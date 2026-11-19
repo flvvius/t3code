@@ -505,7 +505,7 @@ const make = Effect.gen(function* () {
       );
     } else {
       yield* Effect.logInfo(
-        `T3 Connect is reachable from other devices. ${formatConnectReachable(result)}`,
+        `T3 Connect remote control is on: other devices can reach this machine. ${formatConnectReachable(result)}`,
       );
     }
     return result;

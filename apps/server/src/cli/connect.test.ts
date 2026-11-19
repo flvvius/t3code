@@ -18,6 +18,7 @@ import { Command } from "effect/cli";
 
 import { makeCli } from "../binCli.ts";
 import { CLOUD_CLI_DESIRED_LINK_SECRET } from "../cloud/CliState.ts";
+import { RELAY_REMOTE_CONTROL_OFF_SECRET } from "../cloud/config.ts";
 import {
   makePersistedServerRuntimeState,
   persistServerRuntimeState,
@@ -104,6 +105,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, NetService.layer))
         readonly portFreed?: boolean;
         readonly command?: "unlink" | "status";
         readonly linkMode?: "managed" | "publish_only";
+        readonly activityOnly?: boolean;
       },
     ) =>
       Effect.gen(function* () {
@@ -147,6 +149,12 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, NetService.layer))
             `${baseDir}/userdata/secrets/${CLOUD_CLI_DESIRED_LINK_SECRET}.bin`,
             options.linkMode ?? "managed",
           );
+          if (options.activityOnly) {
+            yield* fs.writeFileString(
+              `${baseDir}/userdata/secrets/${RELAY_REMOTE_CONTROL_OFF_SECRET}.bin`,
+              "true",
+            );
+          }
         }
 
         yield* Command.runWith(makeCli({ cloudEnabled: true }), { version: "0.0.0" })([
@@ -219,16 +227,23 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, NetService.layer))
       }),
     );
 
-    it.effect("status does not report a publish-only link as exposed", () =>
-      Effect.gen(function* () {
-        const { printed } = yield* runConnect(process.pid, {
-          command: "status",
-          linkMode: "publish_only",
-        });
+    it.effect.each([
+      { activityOnly: false, remoteControl: "on" },
+      { activityOnly: true, remoteControl: "off" },
+    ])(
+      "status says whether a publish-only link gives the relay remote control ($remoteControl)",
+      ({ activityOnly, remoteControl }) =>
+        Effect.gen(function* () {
+          const { printed } = yield* runConnect(process.pid, {
+            command: "status",
+            linkMode: "publish_only",
+            activityOnly,
+          });
 
-        assert.include(printed, "Exposure: publish-only");
-        assert.notInclude(printed, "Other devices can reach this machine");
-      }),
+          assert.include(printed, "Exposure: publish-only");
+          assert.include(printed, `Remote control through the relay: ${remoteControl}`);
+          assert.notInclude(printed, "Other devices can reach this machine");
+        }),
     );
 
     it.effect("asks a running server to stop its tunnel", () =>

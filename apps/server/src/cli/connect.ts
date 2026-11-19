@@ -44,6 +44,8 @@ import {
   CLOUD_LINKED_USER_ID,
   isAgentActivityPublishingEnabledValue,
   PUBLISH_AGENT_ACTIVITY_SECRET,
+  readRelayRemoteControlAllowed,
+  RELAY_REMOTE_CONTROL_OFF_SECRET,
   RELAY_URL_SECRET,
 } from "../cloud/config.ts";
 import { relayUrlConfig } from "../cloud/publicConfig.ts";
@@ -154,6 +156,8 @@ interface CloudCliStatus {
   readonly cloudUserId: string | null;
   readonly relayUrl: string | null;
   readonly publishAgentActivity: boolean;
+  /** Whether a relay channel may carry remote control of this machine. */
+  readonly relayRemoteControl: boolean;
   readonly relayClient: RelayClient.RelayClientStatus;
   readonly linkMode: CliState.CliDesiredLinkMode;
   /** `null` when no server answered the live check, or none ran because no tunnel is wanted. */
@@ -221,13 +225,16 @@ function formatCloudStatus(
     `  Environment link: ${provisioned}`,
     `  Relay: ${status.relayUrl ?? "not provisioned"}`,
     `  Publish agent activity: ${status.publishAgentActivity ? "enabled" : "disabled"}`,
+    `  Remote control through the relay: ${status.relayRemoteControl ? "on" : "off"}`,
     ...formatRelayClientStatus(status.relayClient),
     ...(!status.desired
       ? []
       : publishOnly
         ? [
             "",
-            "This link publishes agent activity without a managed tunnel. Remote access requires a self-hosted relay channel, a published HTTPS address, or another route such as LAN or Tailscale.",
+            status.relayRemoteControl
+              ? "This link has no managed tunnel, but a self-hosted relay with channels enabled can still carry remote control of this machine. Link with --activity-only to publish agent activity alone."
+              : "This link only publishes agent activity. Remote control has to use another route, such as LAN or Tailscale.",
           ]
         : status.reachability === null
           ? [
@@ -509,12 +516,32 @@ const reportCloudDisconnectResults = Effect.fn("cloud.cli.report_disconnect_resu
   },
 );
 
+const revokeConnectEnrollments = Effect.gen(function* () {
+  const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
+  const revoked = yield* environmentAuth.revokeConnectEnrollments();
+  if (revoked > 0) {
+    yield* Console.log("Revoked the devices and sessions that came in through T3 Connect.");
+  }
+}).pipe(
+  Effect.catch((cause) =>
+    Effect.logWarning("Could not revoke T3 Connect devices.", { cause }).pipe(
+      Effect.andThen(
+        Console.warn(
+          "Could not revoke the devices that came in through T3 Connect.\nRevoke them with `t3 auth connect-device revoke <code>`.",
+        ),
+      ),
+    ),
+  ),
+);
+
 export const disconnectCloud = Effect.fn("cloud.cli.disconnect")(function* (options: {
   readonly clearAuthorization: boolean;
 }) {
   yield* CliState.setCliDesiredCloudLink(false);
   const liveResult = yield* runLiveCloudUnlink();
   const relayResult = yield* Effect.exit(unlinkRelayEnvironment());
+  // The live server already did this; a stopped one cannot, and its next start must not let them in.
+  yield* revokeConnectEnrollments;
   yield* CliState.clearPersistedCloudLink;
 
   if (options.clearAuthorization) {
@@ -598,10 +625,13 @@ function formatRelayClientReady(version: string): string {
 const linkEnvironmentForConnect = Effect.fn("cloud.cli.link_environment")(function* (options: {
   readonly headless: boolean;
   readonly publishOnly?: boolean;
+  /** Publish agent activity, and refuse remote control even from a relay channel. */
+  readonly activityOnly?: boolean;
   /** For `t3 up`, where the user already chose T3 Connect: install it quietly, without asking. */
   readonly installRelayClient?: boolean;
 }) {
-  const publishOnly = options.publishOnly ?? false;
+  const activityOnly = options.activityOnly ?? false;
+  const publishOnly = activityOnly || (options.publishOnly ?? false);
   if (!publishOnly) {
     const relayClient = yield* RelayClient.RelayClient;
     const installed = yield* acquireRelayClientForLink(
@@ -627,9 +657,13 @@ const linkEnvironmentForConnect = Effect.fn("cloud.cli.link_environment")(functi
   yield* CliState.setCliDesiredCloudLink(true, publishOnly ? "publish_only" : "managed");
   if (yield* CliState.dropRevokedCloudLink) {
     yield* Console.log("Replacing the link T3 Connect revoked.");
+    yield* revokeConnectEnrollments;
   }
+  const secrets = yield* ServerSecretStore.ServerSecretStore;
+  yield* activityOnly
+    ? secrets.set(RELAY_REMOTE_CONTROL_OFF_SECRET, stringToBytes("true"))
+    : secrets.remove(RELAY_REMOTE_CONTROL_OFF_SECRET);
   if (publishOnly) {
-    const secrets = yield* ServerSecretStore.ServerSecretStore;
     yield* secrets.set(PUBLISH_AGENT_ACTIVITY_SECRET, stringToBytes("true"));
   }
   return { identity } as const;
@@ -659,7 +693,13 @@ const connectLinkCommand = Command.make("link", {
   headless: headlessFlag,
   publishOnly: Flag.Boolean("publish-only").pipe(
     Flag.withDescription(
-      "Link without a managed tunnel. A self-hosted relay with channels enabled carries remote access. Otherwise set T3CODE_PUBLIC_URL to publish an HTTPS address, or use another route such as Tailscale.",
+      "Link without a managed tunnel. Remote control stays on: a self-hosted relay with channels enabled carries it. Otherwise set T3CODE_PUBLIC_URL to publish an HTTPS address, or use another route such as Tailscale.",
+    ),
+    Flag.withDefault(false),
+  ),
+  activityOnly: Flag.Boolean("activity-only").pipe(
+    Flag.withDescription(
+      "Only publish agent activity to your mobile clients. Nothing, not even a relay channel, gets remote control of this machine through T3 Connect.",
     ),
     Flag.withDefault(false),
   ),
@@ -675,9 +715,11 @@ const connectLinkCommand = Command.make("link", {
         if (linked) {
           const serveCommand = yield* resolveHostCliHint("serve", flags.baseDir);
           yield* Console.log(
-            flags.publishOnly
-              ? `✓ Authorized${connectedAs(linked.identity)}\n\nNext\n  Start T3 to publish agent activity (no managed tunnel).`
-              : `✓ Authorized${connectedAs(linked.identity)}\n\nNext\n  Start the server with \`${serveCommand}\` to make this machine reachable.`,
+            flags.activityOnly
+              ? `✓ Authorized${connectedAs(linked.identity)}\n\nRemote control through T3 Connect: off. This link only publishes agent activity.\n\nNext\n  Start T3 to publish agent activity.`
+              : flags.publishOnly
+                ? `✓ Authorized${connectedAs(linked.identity)}\n\nRemote control through T3 Connect: ON. There is no managed tunnel, but a self-hosted relay with channels enabled can control this machine. Use --activity-only to publish agent activity alone.\n\nNext\n  Start T3 to publish agent activity.`
+                : `✓ Authorized${connectedAs(linked.identity)}\n\nRemote control through T3 Connect: ON.\n\nNext\n  Start the server with \`${serveCommand}\` to make this machine reachable.`,
           );
         }
       }),
@@ -708,6 +750,7 @@ const connectStatusCommand = Command.make("status", {
           revoked,
           executable,
           linkMode,
+          relayRemoteControl,
         ] = yield* Effect.all(
           [
             CliState.readCliDesiredCloudLink,
@@ -718,6 +761,7 @@ const connectStatusCommand = Command.make("status", {
             secrets.get(CLOUD_LINK_REVOKED),
             relayClient.resolve,
             CliState.readCliDesiredLinkMode,
+            readRelayRemoteControlAllowed,
           ],
           { concurrency: "unbounded" },
         );
@@ -734,6 +778,7 @@ const connectStatusCommand = Command.make("status", {
           publishAgentActivity: isAgentActivityPublishingEnabledValue(
             Option.isSome(publishAgentActivity) ? bytesToString(publishAgentActivity.value) : null,
           ),
+          relayRemoteControl,
           relayClient: executable,
           linkMode,
           reachability,
@@ -806,8 +851,9 @@ const connectPublishCommand = Command.make("publish", {
           return;
         }
         yield* CliState.setCliDesiredCloudLink(true, "publish_only");
+        yield* secrets.set(RELAY_REMOTE_CONTROL_OFF_SECRET, stringToBytes("true"));
         yield* Console.log(
-          "Restart T3 to finish authorizing this environment to publish (no managed tunnel is created).",
+          "Restart T3 to finish authorizing this environment to publish. This link only publishes agent activity; it carries no remote control.",
         );
       }),
     ),

@@ -40,12 +40,15 @@ disconnect an otherwise healthy conversation.
 
 ### Approve new devices
 
-By default, any device signed in to your T3 Connect account can open a linked
-machine. To require approval instead, turn on **Require approval for new
-devices** with the T3 Connect settings in **Settings → Sharing & access** on the
-host, or when you first set up T3 Connect. Then someone who takes over your T3
-Connect account cannot reach the machine from a new device without your
-approval. Review the devices that are already approved, described below.
+By default, a new device signed in to your T3 Connect account must be approved
+before it can open a linked machine. Then someone who takes over your T3 Connect
+account, or controls the relay, cannot reach the machine from a new device
+without your approval. Approve your first device from the host itself: the T3
+Code app or browser tab open on the host shows the prompt, or run the
+`t3 auth connect-device` commands below. To let any signed-in device in without
+asking, turn off **Require approval for new devices** in **Settings → Sharing &
+access** on the host. Review the devices that are already approved, described
+below.
 
 A new device waits and shows a code such as `K7QM-2XFD`. Approve it from a
 device that is already connected, using the prompt or **Settings → Sharing &
@@ -55,8 +58,12 @@ headless host, run `t3 auth connect-device list` and then
 and the device asks again when it retries. Deny keeps that device out until its
 request expires.
 
-Each device is approved once. Revoke it from **T3 Connect devices** in the same
-settings page, or with `t3 auth connect-device revoke <code>`. With approval on,
+An approval lasts 7 days; then the device asks again. Set
+`T3CODE_CONNECT_DEVICE_TRUST_DAYS` on the host to change that, or `0` to keep
+approvals until revoked. Unlinking the host from T3 Connect revokes every device
+that came in through it and ends their sessions. Revoke a single device from
+**T3 Connect devices** in the same settings page, or with
+`t3 auth connect-device revoke <code>`. With approval on,
 it has to ask again. With approval off, it can connect again on its own, so
 revoking in the app offers to turn approval on first. Devices that connected through T3 Connect while approval was off stay
 approved and appear in that list for you to review. A device that has not
@@ -114,6 +121,13 @@ proxy or [Tailscale HTTPS](#tailscale-https): start the host with that address i
 `T3CODE_PUBLIC_URL`. The relay must allow such addresses with
 `RELAY_MANUAL_ENDPOINTS=public`, or `private` for Tailscale and LAN addresses.
 
+A relay channel gives approved devices remote control of the host, even when it
+only listens on localhost. `t3 connect link --publish-only` skips the managed
+tunnel but keeps that channel. To only publish agent activity, with no remote
+control through T3 Connect, run `t3 connect link --activity-only`, or start the
+host with `T3CODE_RELAY_REMOTE_CONTROL=false` to refuse channels for every link.
+`t3 connect status` shows which one applies.
+
 For a command-line host, set the relay before `t3 connect`:
 
 ```bash
@@ -145,6 +159,13 @@ t3 up --lan
 For a server in a terminal, run `t3 serve --lan`. Either way, T3 Code then
 accepts connections from your local network and tailnet, so a pairing code is
 all that keeps other devices on them out.
+
+A browser signed in to the host stays signed in only at an IP address, a local
+or tailnet name, or a name the host knows: its `--host`, the address in
+`T3CODE_PUBLIC_URL`, and the names in `T3CODE_ALLOWED_HOSTS`. Behind a reverse
+proxy that keeps your own domain in the Host header, list that domain in
+`T3CODE_ALLOWED_HOSTS` (comma-separated). This stops a web page that points its
+own domain at your machine from using your browser session.
 
 If a server is already running, generate a fresh link without restarting it:
 

@@ -12,6 +12,7 @@ import {
   PUBLISH_AGENT_ACTIVITY_SECRET,
   RELAY_ENVIRONMENT_CREDENTIAL_SECRET,
   RELAY_ISSUER_SECRET,
+  RELAY_REMOTE_CONTROL_OFF_SECRET,
   RELAY_URL_SECRET,
 } from "./config.ts";
 
@@ -88,6 +89,7 @@ export const clearPersistedCloudLink = Effect.gen(function* () {
       secrets.remove(PUBLISH_AGENT_ACTIVITY_SECRET),
       secrets.remove(HOLD_WEBHOOKS_WHILE_OFFLINE_SECRET),
       secrets.remove(CLOUD_LINK_REVOKED),
+      secrets.remove(RELAY_REMOTE_CONTROL_OFF_SECRET),
     ],
     { concurrency: "unbounded" },
   );

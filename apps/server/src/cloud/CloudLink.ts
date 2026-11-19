@@ -91,8 +91,10 @@ import {
   HOLD_WEBHOOKS_WHILE_OFFLINE_SECRET,
   PUBLISH_AGENT_ACTIVITY_SECRET,
   readRelayConnection,
+  readRelayRemoteControlAllowed,
   RELAY_ENVIRONMENT_CREDENTIAL_SECRET,
   RELAY_ISSUER_SECRET,
+  RELAY_REMOTE_CONTROL_OFF_SECRET,
   RELAY_URL_SECRET,
 } from "./config.ts";
 import { EnvironmentSigningKey } from "./environmentKeys.ts";
@@ -253,6 +255,7 @@ const INTERNAL_OPERATION_MESSAGES = {
   "persist-recovered-tunnel": "Could not persist the recovered managed tunnel configuration.",
   "read-relay-config": "Could not read environment relay configuration.",
   "remove-relay-config": "Could not remove environment relay configuration.",
+  "revoke-connect-devices": "Could not revoke the devices T3 Connect enrolled.",
   "update-webhook-settings": "Could not update T3 Connect webhook settings.",
   "read-preferences": "Could not read environment cloud preferences.",
   "persist-preferences": "Could not persist environment cloud preferences.",
@@ -738,6 +741,7 @@ const make = Effect.gen(function* () {
         if (Option.isNone(runtimeBytes)) return false;
         const config = Option.getOrNull(decodeRuntimeConfig(bytesToString(runtimeBytes.value)));
         if (config?.providerKind === "t3_relay") {
+          if (!(yield* readRelayRemoteControlAllowed.pipe(withSecrets))) return false;
           // The channel dials out and forwards to whatever port this server listens on now.
           const status = yield* endpointRuntime.applyConfig(config, localOrigin);
           if (status.status !== "running") {
@@ -799,8 +803,17 @@ const make = Effect.gen(function* () {
           },
         });
       }
-      const endpointRuntimeJson = payload.endpointRuntime
-        ? yield* encodeEndpointRuntimeConfigJson(payload.endpointRuntime)
+      const remoteControlRefused =
+        payload.endpointRuntime?.providerKind === "t3_relay" &&
+        !(yield* readRelayRemoteControlAllowed.pipe(withSecrets));
+      if (remoteControlRefused) {
+        yield* Effect.logInfo(
+          "T3 Connect remote control through the relay is off; this link only publishes activity.",
+        );
+      }
+      const runtimeConfig = remoteControlRefused ? null : payload.endpointRuntime;
+      const endpointRuntimeJson = runtimeConfig
+        ? yield* encodeEndpointRuntimeConfigJson(runtimeConfig)
         : null;
       yield* endpointRuntime.applyConfig(null);
       yield* secrets.remove(CLOUD_ENDPOINT_CONFIRMED_ORIGIN);
@@ -823,14 +836,14 @@ const make = Effect.gen(function* () {
       if (endpointRuntimeJson !== null) {
         yield* secrets.set(CLOUD_ENDPOINT_RUNTIME_CONFIG, stringToBytes(endpointRuntimeJson));
       }
-      if (payload.endpointRuntime === null || options?.confirmedOrigin === undefined) {
+      if (runtimeConfig === null || options?.confirmedOrigin === undefined) {
         return {
           ok: true,
           endpointRuntimeStatus: { status: "disabled" },
         } satisfies EnvironmentCloudRelayConfigResult;
       }
       const endpointRuntimeStatus = yield* endpointRuntime.applyConfig(
-        payload.endpointRuntime,
+        runtimeConfig,
         localOriginUrl(options.confirmedOrigin),
       );
       if (endpointRuntimeStatus.status !== "running") {
@@ -840,7 +853,7 @@ const make = Effect.gen(function* () {
         });
       }
       const marker = yield* encodeConfirmedOriginJson({
-        config: payload.endpointRuntime,
+        config: runtimeConfig,
         origin: options.confirmedOrigin,
       });
       yield* secrets.set(CLOUD_ENDPOINT_CONFIRMED_ORIGIN, stringToBytes(marker));
@@ -1389,6 +1402,10 @@ const make = Effect.gen(function* () {
       return yield* endpointRuntime.withLinkStateLock(
         Effect.gen(function* () {
           const endpointRuntimeStatus = yield* endpointRuntime.applyConfig(null);
+          // Devices came in through this link; they must not outlive it or carry over to the next.
+          yield* environmentAuth
+            .revokeConnectEnrollments()
+            .pipe(Effect.catch(internalError("revoke-connect-devices")));
           yield* Effect.all(
             [
               secrets.remove(CLOUD_LINKED_USER_ID),
@@ -1401,6 +1418,7 @@ const make = Effect.gen(function* () {
               secrets.remove(PUBLISH_AGENT_ACTIVITY_SECRET),
               secrets.remove(HOLD_WEBHOOKS_WHILE_OFFLINE_SECRET),
               secrets.remove(CLOUD_LINK_REVOKED),
+              secrets.remove(RELAY_REMOTE_CONTROL_OFF_SECRET),
             ],
             { concurrency: 10 },
           );
