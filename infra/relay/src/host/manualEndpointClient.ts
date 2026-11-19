@@ -65,6 +65,8 @@ export function endpointAddressRejection(
   return policy === "public" && PRIVATE.check(address, type) ? "private_network" : null;
 }
 
+export const isIpAddress = (value: string) => Net.isIP(value) !== 0;
+
 export class EndpointAddressBlocked extends Schema.TaggedError<EndpointAddressBlocked>()(
   "EndpointAddressBlocked",
   {
