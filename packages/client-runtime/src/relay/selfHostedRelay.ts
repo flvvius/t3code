@@ -22,7 +22,7 @@ export interface RelayPolicy {
   readonly allowedOrigins: ReadonlyArray<string> | null;
 }
 
-export const UNRESTRICTED_RELAY_POLICY: RelayPolicy = { pinned: false, allowedOrigins: null };
+const UNRESTRICTED_RELAY_POLICY: RelayPolicy = { pinned: false, allowedOrigins: null };
 
 /**
  * Reads the build's `T3CODE_RELAY_PINNED` (`true`/`1`) and `T3CODE_RELAY_ALLOWLIST` (origins
@@ -49,7 +49,7 @@ export function parseRelayPolicy(input: {
 export const canChooseSelfHostedRelay = (policy: RelayPolicy): boolean =>
   !policy.pinned && (policy.allowedOrigins === null || policy.allowedOrigins.length > 0);
 
-export const isSelfHostedRelayAllowed = (policy: RelayPolicy, relayUrl: string): boolean =>
+const isSelfHostedRelayAllowed = (policy: RelayPolicy, relayUrl: string): boolean =>
   canChooseSelfHostedRelay(policy) &&
   (policy.allowedOrigins === null || policy.allowedOrigins.includes(relayUrl));
 

@@ -38,9 +38,9 @@ depend on. The stack's `PublishClientConfig` action writes the resulting relay U
 
 A build lets users switch to any self-hosted relay under **T3 Connect service** unless it sets:
 
-| Variable                 | Effect                                                                                                                                                                  |
-| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `T3CODE_RELAY_PINNED`    | `true`: web, desktop and mobile use only `T3CODE_RELAY_URL`. The service choice is hidden and a relay chosen earlier is ignored.                                          |
+| Variable                 | Effect                                                                                                                                                                 |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `T3CODE_RELAY_PINNED`    | `true`: web, desktop and mobile use only `T3CODE_RELAY_URL`. The service choice is hidden and a relay chosen earlier is ignored.                                       |
 | `T3CODE_RELAY_ALLOWLIST` | Comma-separated HTTPS origins the self-hosted choice accepts; any other address is refused before it is contacted. An allowlist with no valid origin hides the choice. |
 
 Sign-in sessions are bound to the relay they were obtained for, so a switch always signs in again.
@@ -49,9 +49,9 @@ The CLI's stored credential is bound to `T3CODE_RELAY_URL` the same way.
 Android preview and production builds allow only HTTPS with system CAs. Development builds also
 allow cleartext and user-installed CAs. To re-enable either in a release build:
 
-| Variable                         | Effect                                                                                                    |
-| -------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `T3CODE_ANDROID_ALLOW_CLEARTEXT` | `1`: allow `http://`. Pairing directly with an environment at an `http://` LAN address needs this.        |
+| Variable                         | Effect                                                                                                     |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `T3CODE_ANDROID_ALLOW_CLEARTEXT` | `1`: allow `http://`. Pairing directly with an environment at an `http://` LAN address needs this.         |
 | `T3CODE_ANDROID_TRUST_USER_CAS`  | `1`: trust CAs in the device's user store, for environments or relays behind a private CA installed there. |
 
 ## CLI OAuth application

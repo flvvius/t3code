@@ -24,7 +24,9 @@ describe("discoverSelfHostedRelay", () => {
     const { requests, fetchImpl } = replying(() =>
       Response.json({ oidc: OIDC, managedTunnels: false }),
     );
-    await expect(discoverSelfHostedRelay(" relay.example.com/ ", { fetch: fetchImpl })).resolves.toEqual({
+    await expect(
+      discoverSelfHostedRelay(" relay.example.com/ ", { fetch: fetchImpl }),
+    ).resolves.toEqual({
       relayUrl: "https://relay.example.com",
       oidcIssuer: OIDC.issuer,
       oidcClientId: OIDC.clientId,

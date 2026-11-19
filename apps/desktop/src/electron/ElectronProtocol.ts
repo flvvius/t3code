@@ -70,7 +70,7 @@ export class ElectronProtocol extends Context.Service<
 const INLINE_SCRIPT = /<script\b(?![^>]*\bsrc\s*=)[^>]*>([\s\S]*?)<\/script\s*>/giu;
 
 /** CSP sources for exactly the inline scripts the bundled HTML ships, so no injected one runs. */
-export async function inlineScriptHashSources(html: string): Promise<ReadonlyArray<string>> {
+async function inlineScriptHashSources(html: string): Promise<ReadonlyArray<string>> {
   return Promise.all(
     Array.from(html.matchAll(INLINE_SCRIPT), async ([, body = ""]) => {
       const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body));
@@ -277,9 +277,7 @@ export const make = Effect.gen(function* () {
           try: () => {
             Electron.protocol.handle(input.scheme, async (request) => {
               if ("assetDirectory" in input) {
-                const response = await runPromise(
-                  serveDesktopAsset(request, input.assetDirectory),
-                );
+                const response = await runPromise(serveDesktopAsset(request, input.assetDirectory));
                 const isHtml = response.headers.get("content-type")?.startsWith("text/html");
                 const inlineScripts = isHtml
                   ? await inlineScriptHashSources(await response.clone().text())

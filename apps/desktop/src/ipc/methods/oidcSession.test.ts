@@ -12,16 +12,15 @@ import * as DesktopIpc from "../DesktopIpc.ts";
 import { installOidcSessionStore } from "./oidcSession.ts";
 
 const SESSION = '{"refreshToken":"refresh-1"}';
-const sealed = (value: string) => `sealed:${[...value].reverse().join("")}`;
+const reverse = (value: string) => Array.from(value).reverse().join("");
+const sealed = (value: string) => `sealed:${reverse(value)}`;
 
 const layerSafeStorage = (available: boolean) =>
   Layer.succeed(ElectronSafeStorage.ElectronSafeStorage, {
     isEncryptionAvailable: Effect.succeed(available),
     encryptString: (value) => Effect.succeed(new TextEncoder().encode(sealed(value))),
     decryptString: (value) =>
-      Effect.sync(() =>
-        [...new TextDecoder().decode(value).slice("sealed:".length)].reverse().join(""),
-      ),
+      Effect.sync(() => reverse(new TextDecoder().decode(value).slice("sealed:".length))),
     selectedStorageBackend: Effect.succeedNone,
   } satisfies ElectronSafeStorage.ElectronSafeStorage["Service"]);
 

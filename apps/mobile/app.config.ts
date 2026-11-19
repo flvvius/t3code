@@ -457,7 +457,8 @@ const config: ExpoConfig = {
       "./plugins/withAndroidNetworkSecurityConfig.cjs",
       {
         // Development builds load from Metro over http and keep the permissive defaults.
-        allowCleartext: APP_VARIANT === "development" || isEnabled(repoEnv.T3CODE_ANDROID_ALLOW_CLEARTEXT),
+        allowCleartext:
+          APP_VARIANT === "development" || isEnabled(repoEnv.T3CODE_ANDROID_ALLOW_CLEARTEXT),
         trustUserCertificates:
           APP_VARIANT === "development" || isEnabled(repoEnv.T3CODE_ANDROID_TRUST_USER_CAS),
       },
