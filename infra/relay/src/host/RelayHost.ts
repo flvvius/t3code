@@ -33,6 +33,8 @@ export interface RelayHost<R = never> {
   readonly managedEndpointBaseDomain: string | undefined;
   /** Whether environments with no public address are carried over relay channels at `/env/<key>/`. */
   readonly channels?: boolean;
+  /** Active environment links one account may hold; unset means no cap. */
+  readonly maxEnvironmentsPerUser?: number;
   readonly database: RelayDb.RelayDb["Service"];
   /** Tunnel and DNS clients behind managed endpoints; inert on hosts without managed tunnels. */
   readonly managedEndpointClients: Layer.Layer<

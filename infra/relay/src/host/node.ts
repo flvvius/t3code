@@ -2,6 +2,7 @@ import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Headers from "effect/http/Headers";
 import * as HttpServerRequest from "effect/http/HttpServerRequest";
 import * as Layer from "effect/Layer";
@@ -18,6 +19,37 @@ import * as MobileTelemetry from "../mobileTelemetry/MobileTelemetry.ts";
 import { makeManualEndpointHttpClient } from "./manualEndpointClient.ts";
 import * as Ports from "./ports.ts";
 import type { RelayHost } from "./RelayHost.ts";
+
+/** Secrets that may come from a file named by `<NAME>_FILE`, as Docker and Compose secrets do. */
+export const FILE_SECRETS = [
+  "DATABASE_URL",
+  "APNS_PRIVATE_KEY",
+  "APNS_DELIVERY_JOB_SIGNING_SECRET",
+  "FCM_SERVICE_ACCOUNT",
+  "CLERK_SECRET_KEY",
+  "T3CHAT_LINK_SECRET",
+  "MOBILE_TELEMETRY_TOKEN",
+] as const;
+
+/**
+ * The environment with each `<NAME>_FILE` secret read in as `<NAME>`. Compose passes unset
+ * variables as empty strings, so empty counts as unset; setting both is refused as ambiguous.
+ */
+export const withFileSecrets = Effect.fn("relay.node.file_secrets")(function* (
+  env: Readonly<Record<string, string | undefined>>,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const resolved: Record<string, string | undefined> = { ...env };
+  for (const name of FILE_SECRETS) {
+    const path = env[`${name}_FILE`]?.trim();
+    if (!path) continue;
+    if (env[name]?.trim()) {
+      return yield* Effect.die(`Set ${name} or ${name}_FILE, not both.`);
+    }
+    resolved[name] = (yield* fs.readFileString(path).pipe(Effect.orDie)).trim();
+  }
+  return resolved;
+});
 
 /**
  * TLS ends at the proxy, so the Node request is plain HTTP. DPoP proofs sign the public URL,
@@ -36,6 +68,7 @@ export interface NodeHostOptions {
   readonly relayPublicOrigin: string;
   readonly stage: string;
   readonly channels?: boolean;
+  readonly maxEnvironmentsPerUser?: number;
   readonly mintKeyPair: {
     readonly privateKey: Redacted.Redacted<string>;
     readonly publicKey: string;
@@ -208,6 +241,9 @@ export const makeNodeHost = Effect.fn("relay.node.host")(function* (options: Nod
     apnsJobSigningSecret: Effect.succeed(apnsJobSigningSecret),
     managedEndpointBaseDomain: undefined,
     channels: options.channels ?? false,
+    ...(options.maxEnvironmentsPerUser === undefined
+      ? {}
+      : { maxEnvironmentsPerUser: options.maxEnvironmentsPerUser }),
     database: options.database,
     managedEndpointClients: Layer.mergeAll(
       Layer.succeed(ManagedEndpointProvider.ManagedEndpointTunnelClient, inertTunnelClient),

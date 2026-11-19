@@ -2,6 +2,7 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import * as FileSystem from "effect/FileSystem";
 import * as HttpServerRequest from "effect/http/HttpServerRequest";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
@@ -10,7 +11,7 @@ import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as TestClock from "effect/testing/TestClock";
 
 import type * as RelayDb from "../db.ts";
-import { fixedWindowLimit, makeNodeHost, withPublicOrigin } from "./node.ts";
+import { fixedWindowLimit, makeNodeHost, withFileSecrets, withPublicOrigin } from "./node.ts";
 import * as Ports from "./ports.ts";
 
 const layer = Layer.mergeAll(SecureRandom.layerWebCrypto, FetchHttpClient.layer);
@@ -42,6 +43,41 @@ describe("withPublicOrigin", () => {
         "https://relay.example.com/v1/client/dpop-token?x=1",
       );
     }),
+  );
+});
+
+describe("withFileSecrets", () => {
+  const files = FileSystem.layerNoop({
+    readFileString: (path) =>
+      path === "/run/secrets/database-url"
+        ? Effect.succeed("postgres://relay:secret@db:5432/relay\n")
+        : Effect.die(`unexpected read of ${path}`),
+  });
+
+  it.effect("reads `<NAME>_FILE` secrets in as `<NAME>`, with empty meaning unset", () =>
+    Effect.gen(function* () {
+      const env = yield* withFileSecrets({
+        DATABASE_URL: "",
+        DATABASE_URL_FILE: "/run/secrets/database-url",
+        MOBILE_TELEMETRY_TOKEN_FILE: "",
+        LOG_FILE: "/var/log/relay.log",
+      });
+      expect(env.DATABASE_URL).toBe("postgres://relay:secret@db:5432/relay");
+      expect(env.MOBILE_TELEMETRY_TOKEN).toBeUndefined();
+      expect(env.LOG).toBeUndefined();
+    }).pipe(Effect.provide(files)),
+  );
+
+  it.effect("refuses a secret set both directly and from a file", () =>
+    Effect.gen(function* () {
+      const exit = yield* Effect.exit(
+        withFileSecrets({
+          DATABASE_URL: "postgres://elsewhere",
+          DATABASE_URL_FILE: "/run/secrets/database-url",
+        }),
+      );
+      expect(Exit.hasDies(exit)).toBe(true);
+    }).pipe(Effect.provide(files)),
   );
 });
 

@@ -25,6 +25,8 @@ import * as EnvironmentLinks from "./EnvironmentLinks.ts";
 import * as ManagedEndpointProvider from "./ManagedEndpointProvider.ts";
 import { channelEndpoint, channelKey } from "./RelayChannelEndpoint.ts";
 import * as RelayConfiguration from "../Config.ts";
+import * as RelayDb from "../db.ts";
+import * as ManagedTunnelLimits from "./ManagedTunnelLimits.ts";
 
 export class EnvironmentLinkProofExpired extends Schema.TaggedError<EnvironmentLinkProofExpired>()(
   "EnvironmentLinkProofExpired",
@@ -72,6 +74,7 @@ export type EnvironmentLinkError =
   | DpopProofs.DpopProofReplayPersistenceError
   | EnvironmentLinks.EnvironmentLinkUpsertPersistenceError
   | EnvironmentCredentials.EnvironmentCredentialCreatePersistenceError
+  | ManagedTunnelLimits.ManagedTunnelLimitExceeded
   | ManagedEndpointProvider.ManagedEndpointProviderError;
 
 export class EnvironmentLinker extends Context.Service<
@@ -147,6 +150,7 @@ const make = Effect.gen(function* () {
   const relayTokens = yield* RelayTokens.RelayTokens;
   const config = yield* RelayConfiguration.RelayConfiguration;
   const signature = yield* Signature.Signature;
+  const transactions = yield* RelayDb.RelayTransactions;
 
   return EnvironmentLinker.of({
     link: Effect.fn("relay.environment_linker.link")(function* (input) {
@@ -339,11 +343,38 @@ const make = Effect.gen(function* () {
           stage: "validate_endpoint",
         });
       }
-      yield* links.upsert({ ...input, proof: verified, endpoint });
-      const environmentCredential = yield* credentials.create({
-        environmentId: verified.environmentId,
-        environmentPublicKey: verified.environmentPublicKey,
-      });
+      const persistenceFailed = (cause: unknown) =>
+        new EnvironmentLinks.EnvironmentLinkUpsertPersistenceError({
+          userId: input.userId,
+          environmentId: verified.environmentId,
+          cause,
+        });
+      // One transaction, so a failed or refused link never leaves a link without a credential.
+      const environmentCredential = yield* transactions
+        .withTransaction(
+          Effect.gen(function* () {
+            yield* links.upsert({ ...input, proof: verified, endpoint });
+            const maxLinks = config.maxEnvironmentsPerUser;
+            if (maxLinks !== undefined) {
+              const active = yield* links
+                .listForUser({ userId: input.userId })
+                .pipe(Effect.mapError(persistenceFailed));
+              if (active.length > maxLinks) {
+                return yield* new ManagedTunnelLimits.ManagedTunnelLimitExceeded({
+                  userId: input.userId,
+                  environmentId: verified.environmentId,
+                  maxTunnels: maxLinks,
+                  activeTunnels: active.length - 1,
+                });
+              }
+            }
+            return yield* credentials.create({
+              environmentId: verified.environmentId,
+              environmentPublicKey: verified.environmentPublicKey,
+            });
+          }),
+        )
+        .pipe(Effect.catchTag("SqlError", (error) => Effect.fail(persistenceFailed(error))));
       return {
         environmentId: verified.environmentId,
         endpoint,

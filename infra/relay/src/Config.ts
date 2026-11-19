@@ -42,6 +42,23 @@ export const legacyTunnelGraceMinutesConfig = Config.option(
   ),
 );
 
+const decodePositiveInt = Schema.decodeUnknownEffect(
+  Schema.NumberFromString.pipe(Schema.check(Schema.isInt(), Schema.isGreaterThan(0))),
+);
+
+/** A positive integer setting; unset or empty (as Compose passes unset variables) means `fallback`. */
+export const positiveIntConfig = (name: string, fallback: number) =>
+  Config.String(name).pipe(
+    Config.withDefault(""),
+    Config.mapEffect((value) =>
+      value.trim() === ""
+        ? Effect.succeed(fallback)
+        : decodePositiveInt(value.trim()).pipe(
+            Effect.mapError((error) => new Config.ConfigError(error)),
+          ),
+    ),
+  );
+
 export interface ApnsCredentials {
   readonly teamId: string;
   readonly keyId: string;
@@ -89,6 +106,8 @@ export class RelayConfiguration extends Context.Service<
     readonly managedEndpointBaseDomain: string | undefined;
     /** Carries publish-only environments over relay channels; self-hosted Node relays only. */
     readonly channels?: boolean;
+    /** Active environment links one account may hold; unset means no cap. */
+    readonly maxEnvironmentsPerUser?: number;
     readonly managedEndpointNamespace: string | undefined;
     readonly managedEndpointCleanupMode?: ManagedEndpointCleanupMode;
     readonly legacyManagedEndpointCleanupMode?: ManagedEndpointCleanupMode;
